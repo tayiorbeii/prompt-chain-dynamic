@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DecisionRecord, DecisionRequest, Finding, NormalizedReview, RiskLevel } from "./types.ts";
+import type { AmendmentProposal, DecisionRecord, DecisionRequest, Finding, NormalizedReview, RiskLevel } from "./types.ts";
 
 export function decisionRequestFromReview(
   review: NormalizedReview,
@@ -96,6 +96,30 @@ Return exactly:
   <requiredVerification>one verification item</requiredVerification>
   <assumptions>assumptions made</assumptions>
 </decision>`;
+}
+
+/**
+ * Creates a DecisionRecord that auto-approves an AmendmentProposal without human
+ * involvement. Sets source to "auto" so callers can distinguish from agent and human.
+ */
+export function autoApproveAmendment(
+  proposal: AmendmentProposal,
+  context: { runId: string; stageId: string },
+): DecisionRecord {
+  const now = new Date().toISOString();
+  return {
+    id: `decision-${randomUUID()}`,
+    requestId: `auto-amendment-${randomUUID()}`,
+    runId: context.runId,
+    stageId: context.stageId,
+    actor: "agent",
+    source: "auto",
+    status: "decided",
+    choice: "auto-approve",
+    rationale: `Auto-approved contract amendment: ${proposal.reason}. Risk class: ${proposal.riskClass}.`,
+    implementationDirection: `Continue with updated contract. New paths: ${proposal.revalidatedPaths.join(", ")}.`,
+    createdAt: now,
+  };
 }
 
 function parseOptions(raw: string): Array<{ id: string; description: string }> {

@@ -9,6 +9,88 @@ export type FindingDisposition = "open" | "resolved" | "accepted-risk" | "obsole
 export type RunStatus = "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
 export type StageStatus = "pending" | "running" | "paused" | "completed" | "failed" | "skipped";
 
+/** The reason a stage cannot be scheduled or was skipped by the scheduler. */
+export type StageSchedulingReason =
+  | { kind: "waiting_on_active_stage" }
+  | { kind: "waiting_on_failed_dependency"; dependencyId: string }
+  | { kind: "decision_pending" }
+  | { kind: "stale_worker_reclaimed" }
+  | { kind: "invariant_violation" };
+
+export type FailureCategory = "transient" | "context-overflow" | "provider-quota" | "semantic" | "structural";
+
+export interface RunLease {
+  owner: string;
+  generation: number;
+  heartbeatAt: string;
+  leaseTimeoutMs: number;
+}
+
+export interface AttemptRecord {
+  attempt: number;
+  role: string;
+  commitHash?: string;
+  validationResults: ValidationResult[];
+  reviewVerdict: NormalizedReview;
+  diffHash: string;
+  asi: Record<string, unknown>;
+  status: "keep" | "discard" | "crash" | "checks_failed";
+  startedAt: string;
+  completedAt?: string;
+  /** Hash of the stage contract in effect for this attempt, when contract tracking is enabled. */
+  contractHash?: string;
+}
+
+export interface AmendmentProposal {
+  oldContractHash: string;
+  newContractHash: string;
+  revalidatedPaths: string[];
+  revalidatedDeps: string[];
+  riskClass: "auto-approve" | "human-required";
+  reason: string;
+}
+
+export interface ContinuationPolicy {
+  mode?: "supervised";
+  transientRetries?: number;
+  contextOverflowCompactionRetries?: number;
+  providerLimitAutoResumeMs?: number;
+  continuationRetryMs?: number;
+  runtimePersistIntervalMs?: number;
+  stagnationRounds?: number;
+  maxResearchEscalations?: number;
+  autoResumeTurnLimit?: number;
+  consecutiveFailureOverride?: number;
+  leaseTimeoutMs?: number;
+  checkpointVerifiedStages?: boolean;
+  onRequiredExhaustion?: "research";
+  onOptionalExhaustion?: "checkpoint-and-follow-up";
+  /** @deprecated Use continuationRetryMs. */
+  retryIntervalMs?: number;
+  /** @deprecated Use autoResumeTurnLimit. */
+  maxTurns?: number;
+  /** @deprecated Use consecutiveFailureOverride. */
+  maxConsecutiveFailures?: number;
+  /** @deprecated Use runtimePersistIntervalMs. */
+  persistIntervalMs?: number;
+}
+
+export interface ResearchPolicy {
+  github?: boolean;
+  sandboxedChild?: boolean;
+  timeoutMs?: number;
+  stdoutCapBytes?: number;
+  requireCitations?: boolean;
+  requireAdaptationPlan?: boolean;
+  injectAs?: "steerMessage";
+  /** @deprecated Research is configured by the presence of this policy. */
+  enabled?: boolean;
+  /** @deprecated Use maxResearchEscalations in continuationPolicy. */
+  maxRounds?: number;
+  /** @deprecated Use the runtime research integration instead. */
+  hookCommand?: string;
+}
+
 export interface GeneratorMetadata {
   name: string;
   version: string;
@@ -62,6 +144,9 @@ export interface TripSettings {
     roleTiers?: Partial<Record<AgentRequest["role"], string>>;
     roleModels?: Partial<Record<AgentRequest["role"], string>>;
   };
+  checkpointStrategy?: "keep" | "squash";
+  continuationPolicy?: ContinuationPolicy;
+  researchPolicy?: ResearchPolicy;
 }
 
 export interface TripStage {
@@ -134,6 +219,8 @@ export interface DecisionRecord {
   runId: string;
   stageId: string;
   actor: "agent" | "human";
+  /** Identifies agentic, human, or policy-driven decisions. */
+  source?: "agent" | "human" | "auto";
   status: "decided" | "blocked";
   choice?: string;
   rationale: string;
@@ -198,8 +285,13 @@ export interface AgentBackend {
 export interface StageRunState {
   id: string;
   status: StageStatus;
-  attempts: number;
+  /** Recovery-aware attempt history. */
+  attempts: AttemptRecord[];
   reviewRounds: number;
+  schedulingReason?: StageSchedulingReason;
+  blockedBy?: string[];
+  contractHash?: string;
+  verifiedCommit?: string;
   startedAt?: string;
   completedAt?: string;
   pauseReason?: string;
@@ -233,6 +325,7 @@ export interface RunState {
   decisionRequests: DecisionRequest[];
   decisions: DecisionRecord[];
   resultCommit?: string;
+  lease?: RunLease;
 }
 
 export interface ManifestValidationIssue {

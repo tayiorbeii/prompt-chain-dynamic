@@ -1,0 +1,15 @@
+{
+  "id": "finding-a34946f6-ba1f-4ac3-8581-f521b6460e47",
+  "runId": "trip-20260722154956-6afee46b",
+  "stageId": "implement-slice-1-data-model-foundation",
+  "attempt": 2,
+  "source": "worker",
+  "severity": "major",
+  "blocking": true,
+  "summary": "Replaced the untyped StageRunState.attempts with the explicit migration-safe union AttemptRecord[] | LegacyAttemptCounter, removed the extra AttemptRecord field so its prescribed record shape is exact, and expanded ContinuationPolicy/Resear",
+  "evidence": "Replaced the untyped StageRunState.attempts with the explicit migration-safe union AttemptRecord[] | LegacyAttemptCounter, removed the extra AttemptRecord field so its prescribed record shape is exact, and expanded ContinuationPolicy/ResearchPolicy to the reconciled configuration fields and literal values. All requested exported data-model additions remain present. src/types.ts compiles in isolation with the project compiler settings, and diff --check passes. Full-project compilation now correctly exposes nine runner errors where the existing numeric counter arithmetic has not yet narrowed or migrated the new attempts union.",
+  "affectedPaths": [],
+  "disposition": "open",
+  "createdAt": "2026-07-22T15:57:19.586Z",
+  "updatedAt": "2026-07-22T15:57:19.586Z"
+}

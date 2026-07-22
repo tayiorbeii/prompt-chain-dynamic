@@ -7,6 +7,7 @@ import {
   calculateStageDelta,
   captureBinaryPatch,
   changedPaths,
+  createCheckpointCommit,
   createWorktree,
   currentHead,
   ensureGitRepository,
@@ -29,7 +30,10 @@ import {
   openBlockingFindings,
   synthesizeReviews,
 } from "./review.ts";
-import { buildDecisionPrompt, decisionRequestFromReview, parseDecision } from "./decision.ts";
+import { autoApproveAmendment, buildDecisionPrompt, decisionRequestFromReview, parseDecision } from "./decision.ts";
+import { hashContract, buildAmendmentProposal } from "./contract.ts";
+import { isStagnant, stagnationFingerprint } from "./stagnation.ts";
+import { spawnResearchHook } from "./research-hook.ts";
 import {
   appendRunEvent,
   atomicWriteJson,
@@ -45,6 +49,7 @@ import { DynamicWorkflowBackend } from "./dynamic-backend.ts";
 import type {
   AgentBackend,
   AgentRequest,
+  AttemptRecord,
   DecisionRecord,
   DecisionRequest,
   Finding,
@@ -66,6 +71,9 @@ export interface RunOptions {
 export interface ResumeOptions {
   repositoryRoot: string;
   runId: string;
+  /** Generation token captured from state.lease.generation before the resume call.
+   * A stale token returns the current state without side effects. */
+  leaseGeneration?: number;
   backend?: AgentBackend;
   onEvent?: RunOptions["onEvent"];
 }
@@ -79,6 +87,8 @@ interface RunnerContext {
   backend: AgentBackend;
   state: RunState;
   onEvent?: RunOptions["onEvent"];
+  /** Output from prior research/readonly stages, injected into implementation prompts. */
+  researchOutput?: string;
 }
 
 class PauseRun extends Error {
@@ -122,6 +132,12 @@ export async function runManifestFile(options: RunOptions): Promise<RunState> {
     findings: [],
     decisionRequests: [],
     decisions: [],
+    lease: {
+      owner: id,
+      generation: 1,
+      heartbeatAt: now,
+      leaseTimeoutMs: manifest.settings?.continuationPolicy?.retryIntervalMs ?? 120_000,
+    },
   };
   await initializeRunStorage(repository, id);
   await atomicWriteJson(path.join(runRoot(repository, id), "manifest.json"), manifest);
@@ -143,6 +159,16 @@ export async function resumeRun(options: ResumeOptions): Promise<RunState> {
   const state = await loadRunState(repository, options.runId);
   const manifest = assertValidManifest(state.manifest);
   if (state.status === "completed" || state.status === "aborted") return state;
+  // Stale generation check: a caller with an outdated lease token gets the current
+  // state back without any side effects (verbatim from pi-codex-goal pattern).
+  if (options.leaseGeneration !== undefined && state.lease && state.lease.generation !== options.leaseGeneration) {
+    return state;
+  }
+  // Bump lease generation on successful resumption
+  if (state.lease) {
+    state.lease.generation += 1;
+    state.lease.heartbeatAt = new Date().toISOString();
+  }
   await reconcileInterruptedStages(repository, state);
   state.status = "pending";
   state.pauseKind = undefined;
@@ -235,8 +261,37 @@ async function execute(context: RunnerContext): Promise<RunState> {
       }
       const ready = pending.filter((stage) => stage.needs.every((dependency) => state.stageStates[dependency]?.status === "completed"));
       if (!ready.length) {
-        const blockers = pending.map((stage) => `${stage.id} waits for ${stage.needs.filter((dependency) => state.stageStates[dependency]?.status !== "completed").join(", ")}`);
-        throw new Error(`no runnable stage remains:\n${blockers.join("\n")}`);
+        // Mark stages whose dependencies have failed or been skipped as skipped with
+        // a typed schedulingReason — no plain Error thrown.
+        const newlySkipped = pending.filter((stage) =>
+          stage.needs.some((dep) => {
+            const s = state.stageStates[dep]?.status;
+            return s === "failed" || s === "skipped";
+          }),
+        );
+        if (newlySkipped.length > 0) {
+          for (const stage of newlySkipped) {
+            const failedDeps = stage.needs.filter((dep) => {
+              const s = state.stageStates[dep]?.status;
+              return s === "failed" || s === "skipped";
+            });
+            const ss = requiredStageState(state, stage.id);
+            ss.status = "skipped";
+            ss.schedulingReason = { kind: "waiting_on_failed_dependency", dependencyId: failedDeps[0]! };
+            ss.blockedBy = failedDeps;
+            await emit(context, "stage.skipped", `Stage ${stage.id} skipped: dependency failed (${failedDeps.join(", ")})`, stage.id);
+          }
+          await writeRunState(context.repositoryRoot, context.state);
+          continue;
+        }
+        // True deadlock — no stages can be scheduled
+        const blockers = pending.map((stage) => `${stage.id} waits for ${stage.needs.filter((dep) => state.stageStates[dep]?.status !== "completed").join(", ")}`);
+        state.status = "failed";
+        state.pauseKind = "blocked";
+        state.pauseReason = `Deadlock: no runnable stage remains:\n${blockers.join("\n")}`;
+        await emit(context, "run.failed", state.pauseReason);
+        await writeRunState(context.repositoryRoot, state);
+        return state;
       }
       const serial = ready.find((stage) => stage.isolation === "same-checkout" || stage.type === "integration");
       if (serial) {
@@ -299,12 +354,27 @@ async function executeStage(context: RunnerContext, stage: TripStage): Promise<v
 }
 
 async function runReadonlyStage(context: RunnerContext, stage: TripStage, stageState: StageRunState): Promise<void> {
-  stageState.attempts += 1;
-  const artifactDirectory = attemptDirectory(context, stage.id, stageState.attempts, "research");
+  const attemptNum = stageState.attempts.length + 1;
+  const artifactDirectory = attemptDirectory(context, stage.id, attemptNum, "research");
+  const startedAt = new Date().toISOString();
   const result = await context.backend.run(agentRequest(context, stage, "research", context.workingDirectory, stage.prompt, artifactDirectory));
   if (!result.success) throw new Error(result.error ?? "readonly agent failed");
   stageState.lastAgentOutput = result.text;
   await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/result.md`, result.text);
+  // Record a minimal research attempt
+  stageState.attempts.push({
+    attempt: attemptNum,
+    role: "research",
+    validationResults: [],
+    reviewVerdict: emptyReview(),
+    diffHash: "",
+    asi: {},
+    status: "keep",
+    startedAt,
+    completedAt: new Date().toISOString(),
+  });
+  // Capture research output for injection into dependent implementation prompts
+  if (!context.researchOutput) context.researchOutput = result.text;
 }
 
 async function runWriterStage(
@@ -313,6 +383,9 @@ async function runWriterStage(
   stageState: StageRunState,
   integration: boolean,
 ): Promise<void> {
+  const attemptHistory = stageState.attempts;
+  let attemptNum = attemptHistory.length;
+
   const location = await writerLocation(context, stage, stageState);
   const gitRoot = location.gitRoot;
   const agentCwd = location.agentCwd;
@@ -321,22 +394,58 @@ async function runWriterStage(
     throw new Error(`worktree ${stage.id} is not at the immutable run base revision`);
   }
   const stageStart = await snapshotChangedPathStates(gitRoot);
-  let nextPrompt = stageState.attempts > 0
+
+  // Hash the stage contract at start (Slice 7)
+  stageState.contractHash = hashContract(stage);
+
+  // Determine initial prompt, injecting research output for first attempt
+  let nextPrompt = attemptNum > 0
     ? recoveryPrompt(stage, latestDecisionDirection(context.state, stage.id))
-    : stage.prompt;
+    : injectResearch(stage.prompt, context.researchOutput);
+
   const maximumRounds = context.manifest.settings?.reviewPolicy?.maxRepairRounds ?? 4;
+  const maxConsecutiveFailures = context.manifest.settings?.continuationPolicy?.maxConsecutiveFailures ?? 5;
+  let consecutiveFailures = 0;
+  // Track whether we've already triggered a research escalation for this stage
+  let researchEscalated = false;
 
   while (stageState.reviewRounds <= maximumRounds) {
+    if (consecutiveFailures >= maxConsecutiveFailures) {
+      throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} paused after ${maxConsecutiveFailures} consecutive failures.`);
+    }
     if (context.state.abortRequested) throw new PauseRun("blocked", stage.id, "Abort requested; stopped before the next agent attempt.");
-    stageState.attempts += 1;
-    const role = integration ? "integration" : stageState.attempts === 1 ? "implementation" : "repair";
+
+    attemptNum += 1;
+    const role: AgentRequest["role"] = integration ? "integration" : attemptNum === 1 ? "implementation" : "repair";
     const beforeAttempt = await snapshotChangedPathStates(gitRoot);
     const headBefore = await currentHead(gitRoot);
-    const artifactDirectory = attemptDirectory(context, stage.id, stageState.attempts, role);
+    const attemptStartedAt = new Date().toISOString();
+    const artifactDirectory = attemptDirectory(context, stage.id, attemptNum, role);
     const result = await context.backend.run(agentRequest(context, stage, role, agentCwd, nextPrompt, artifactDirectory));
     stageState.lastAgentOutput = result.text;
-    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${stageState.attempts}/agent-response.md`, result.text || result.error || "");
-    if (!result.success) throw new Error(result.error ?? `${role} agent failed`);
+    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/agent-response.md`, result.text || result.error || "");
+
+    if (!result.success) {
+      // Agent execution failed (infrastructure/crash) — fail immediately.
+      // Record a crash attempt for history, then propagate the error so
+      // executeStage can handle required vs non-required stage failure.
+      const crashRecord: AttemptRecord = {
+        attempt: attemptNum,
+        role,
+        validationResults: [],
+        reviewVerdict: emptyReview(),
+        diffHash: "",
+        asi: { error: result.error },
+        status: "crash",
+        startedAt: attemptStartedAt,
+        completedAt: new Date().toISOString(),
+        contractHash: stageState.contractHash,
+      };
+      attemptHistory.push(crashRecord);
+      throw new Error(result.error ?? `${role} agent failed`);
+    }
+
+    consecutiveFailures = 0;
     const headAfter = await currentHead(gitRoot);
     if (headAfter !== headBefore) throw new Error(`agent created a direct commit in ${stage.id}; the runtime is the only commit authority`);
     const attemptDelta = await calculateStageDelta(gitRoot, beforeAttempt);
@@ -345,8 +454,26 @@ async function runWriterStage(
     const workerReview = normalizeReview(result.text);
     if (workerReview.status !== "complete") {
       const direction = await handleNonCompleteVerdict(context, stage, stageState, workerReview, "worker", agentCwd);
+      const diffHash = sha256(await captureBinaryPatch(gitRoot));
+      const discardRecord: AttemptRecord = {
+        attempt: attemptNum,
+        role,
+        validationResults: stageState.validationResults,
+        reviewVerdict: workerReview,
+        diffHash,
+        asi: { source: "worker" },
+        status: "discard",
+        startedAt: attemptStartedAt,
+        completedAt: new Date().toISOString(),
+        contractHash: stageState.contractHash,
+      };
+      attemptHistory.push(discardRecord);
       stageState.reviewRounds += 1;
-      if (stageState.reviewRounds > maximumRounds) throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved feedback.`);
+      if (stageState.reviewRounds > maximumRounds) {
+        const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
+        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
+        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved feedback.`);
+      }
       nextPrompt = repairPrompt(stage, context.state, direction);
       await writeRunState(context.repositoryRoot, context.state);
       continue;
@@ -357,24 +484,57 @@ async function runWriterStage(
     if (!validationPassed(validation)) {
       const finding = validationFinding(context, stage, stageState, validation);
       await addFinding(context, finding);
+      const diffHash = sha256(await captureBinaryPatch(gitRoot));
+      const checksFailedRecord: AttemptRecord = {
+        attempt: attemptNum,
+        role,
+        validationResults: validation,
+        reviewVerdict: emptyReview(),
+        diffHash,
+        asi: { source: "deterministic-validation" },
+        status: "checks_failed",
+        startedAt: attemptStartedAt,
+        completedAt: new Date().toISOString(),
+        contractHash: stageState.contractHash,
+      };
+      attemptHistory.push(checksFailedRecord);
       stageState.reviewRounds += 1;
-      if (stageState.reviewRounds > maximumRounds) throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} validation remained red after ${maximumRounds} repair rounds.`);
+      if (stageState.reviewRounds > maximumRounds) {
+        const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
+        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
+        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} validation remained red after ${maximumRounds} repair rounds.`);
+      }
       nextPrompt = repairPrompt(stage, context.state, "Fix the deterministic validation failures exactly; do not expand scope.");
       continue;
     }
 
     const reviews = await runReviewers(context, stage, stageState, agentCwd, validation, integration);
     const synthesis = synthesizeReviews(reviews);
-    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${stageState.attempts}/review-synthesis.json`, `${JSON.stringify(synthesis, null, 2)}\n`);
+    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/review-synthesis.json`, `${JSON.stringify(synthesis, null, 2)}\n`);
+
     if (synthesis.status === "complete" && !synthesis.findings.some((finding) => finding.blocking)) {
       const finalDelta = await calculateStageDelta(gitRoot, stageStart);
       enforcePathContract(context, stage, finalDelta.changedDuring);
       stageState.changedPaths = finalDelta.changedDuring;
+      const diffHash = sha256(await captureBinaryPatch(gitRoot));
+      const keepRecord: AttemptRecord = {
+        attempt: attemptNum,
+        role,
+        validationResults: validation,
+        reviewVerdict: synthesis,
+        diffHash,
+        asi: { source: "ensemble-review" },
+        status: "keep",
+        startedAt: attemptStartedAt,
+        completedAt: new Date().toISOString(),
+        contractHash: stageState.contractHash,
+      };
+      attemptHistory.push(keepRecord);
       markFindingsResolved(context.state.findings, stage.id, {
-        repairAttempt: stageState.attempts,
+        repairAttempt: attemptNum,
         changedPaths: finalDelta.changedDuring,
-        validationArtifact: `stages/${stage.id}/attempt-${stageState.attempts}/validation.json`,
-        reviewArtifact: `stages/${stage.id}/attempt-${stageState.attempts}/review-synthesis.json`,
+        validationArtifact: `stages/${stage.id}/attempt-${attemptNum}/validation.json`,
+        reviewArtifact: `stages/${stage.id}/attempt-${attemptNum}/review-synthesis.json`,
         actor: "fresh-reviewer-ensemble",
       });
       for (const finding of context.state.findings.filter((entry) => entry.stageId === stage.id && entry.disposition === "resolved")) {
@@ -383,13 +543,31 @@ async function runWriterStage(
       if (openBlockingFindings(context.state.findings, stage.id).length) {
         throw new Error(`stage ${stage.id} cannot complete with unresolved blocking findings`);
       }
-      await persistWriterBoundary(context, stage, stageState, gitRoot);
+      await persistWriterBoundary(context, stage, stageState, gitRoot, attemptNum, validation);
       return;
     }
 
     const direction = await handleNonCompleteVerdict(context, stage, stageState, synthesis, integration ? "integration-review" : "independent-review", agentCwd);
+    const diffHash = sha256(await captureBinaryPatch(gitRoot));
+    const reviewDiscardRecord: AttemptRecord = {
+      attempt: attemptNum,
+      role,
+      validationResults: validation,
+      reviewVerdict: synthesis,
+      diffHash,
+      asi: { source: integration ? "integration-review" : "independent-review" },
+      status: "discard",
+      startedAt: attemptStartedAt,
+      completedAt: new Date().toISOString(),
+      contractHash: stageState.contractHash,
+    };
+    attemptHistory.push(reviewDiscardRecord);
     stageState.reviewRounds += 1;
-    if (stageState.reviewRounds > maximumRounds) throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved review findings.`);
+    if (stageState.reviewRounds > maximumRounds) {
+      const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
+      if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
+      throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved review findings.`);
+    }
     nextPrompt = repairPrompt(stage, context.state, direction);
   }
   throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} did not reach a verified completion boundary.`);
@@ -469,7 +647,7 @@ async function handleNonCompleteVerdict(
   const findings = findingsFromReview(review, {
     runId: context.state.id,
     stageId: stage.id,
-    attempt: stageState.attempts,
+    attempt: stageState.attempts.length,
     source,
   });
   for (const finding of findings) await addFinding(context, finding);
@@ -555,12 +733,13 @@ async function runReviewers(
   ];
   return await Promise.all(Array.from({ length: count }, async (_, index) => {
     const prompt = reviewPrompt(context, stage, validation, open, angles[index % angles.length] ?? "correctness", integration);
-    const artifactDirectory = attemptDirectory(context, stage.id, stageState.attempts, `reviewer-${index + 1}`);
+    const currentAttemptCount = stageState.attempts.length;
+    const artifactDirectory = attemptDirectory(context, stage.id, currentAttemptCount, `reviewer-${index + 1}`);
     const result = await context.backend.run(agentRequest(context, stage, "review", cwd, prompt, artifactDirectory, ["read", "grep", "find", "ls"]));
     const review = result.success
       ? normalizeReview(result.text)
       : normalizeReview(`<status>blocked</status><risk>high</risk><rationale>Reviewer session failed: ${escapeXml(result.error ?? "unknown error")}</rationale>`);
-    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${stageState.attempts}/review-${index + 1}.json`, `${JSON.stringify(review, null, 2)}\n`);
+    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${currentAttemptCount}/review-${index + 1}.json`, `${JSON.stringify(review, null, 2)}\n`);
     return review;
   }));
 }
@@ -570,6 +749,8 @@ async function persistWriterBoundary(
   stage: TripStage,
   stageState: StageRunState,
   gitRoot: string,
+  attemptNum: number,
+  validation: ValidationResult[],
 ): Promise<void> {
   const patch = await captureBinaryPatch(gitRoot);
   const relative = `stages/${stage.id}/${stage.isolation === "worktree" ? "patch.diff" : "cumulative.patch.diff"}`;
@@ -582,11 +763,26 @@ async function persistWriterBoundary(
     stageState.cumulativePatchPath = patchPath;
     stageState.cumulativePatchSha256 = digest;
   }
+  // Create a verified-stage checkpoint commit on a dedicated ref (Slice 6)
+  try {
+    const checkpointHash = await createCheckpointCommit(gitRoot, context.state.id, stage.id, {
+      "Durable-Trip-Run": context.state.id,
+      "Durable-Trip-Stage": stage.id,
+      "Durable-Trip-Attempt": String(attemptNum),
+      "Durable-Trip-Validation": `stages/${stage.id}/attempt-${attemptNum}/validation.json`,
+      "Durable-Trip-Review": `stages/${stage.id}/attempt-${attemptNum}/review-synthesis.json`,
+      "Durable-Trip-Diff-Hash": digest,
+    });
+    stageState.verifiedCommit = checkpointHash;
+  } catch {
+    // Checkpoint creation is best-effort; do not fail the stage boundary
+  }
   await appendRunEvent(context.repositoryRoot, context.state.id, {
     type: "stage.boundary.persisted",
     stageId: stage.id,
     patchSha256: digest,
     changedPaths: stageState.changedPaths,
+    verifiedCommit: stageState.verifiedCommit,
   });
   await writeRunState(context.repositoryRoot, context.state);
 }
@@ -668,7 +864,7 @@ function validationFinding(
     id: `finding-${randomUUID()}`,
     runId: context.state.id,
     stageId: stage.id,
-    attempt: stageState.attempts,
+    attempt: stageState.attempts.length,
     source: "deterministic-validation",
     severity: "major",
     blocking: true,
@@ -815,11 +1011,67 @@ function newStageState(id: string): StageRunState {
   return {
     id,
     status: "pending",
-    attempts: 0,
+    attempts: [],
     reviewRounds: 0,
     changedPaths: [],
     validationResults: [],
   };
+}
+
+/** Returns an empty NormalizedReview for crash/pre-review attempt records. */
+function emptyReview(): import("./types.ts").NormalizedReview {
+  return {
+    status: "continue",
+    risk: "medium",
+    rationale: "",
+    missingItems: [],
+    findings: [],
+    raw: "",
+    malformed: false,
+  };
+}
+
+/**
+ * Injects research stage output into an implementation prompt so that dependent
+ * stages receive the initial research context (closes the research-injection gap).
+ */
+function injectResearch(prompt: string, researchOutput: string | undefined): string {
+  if (!researchOutput) return prompt;
+  return `${prompt}\n\nRESEARCH CONTEXT\nThe following research was gathered by the research stage and should inform your implementation:\n${researchOutput}`;
+}
+
+/**
+ * Attempts to escalate the repair loop via the configured research hook when the
+ * stage is stagnant. Returns a new nextPrompt string with research context injected
+ * if escalation succeeds, or undefined if escalation should not be attempted.
+ */
+async function tryResearchEscalation(
+  context: RunnerContext,
+  stage: TripStage,
+  stageState: StageRunState,
+  agentCwd: string,
+  attemptHistory: AttemptRecord[],
+  alreadyEscalated: boolean,
+): Promise<string | undefined> {
+  if (alreadyEscalated) return undefined;
+  const policy = context.manifest.settings?.researchPolicy;
+  if (!policy?.hookCommand) return undefined;
+  if (!isStagnant(attemptHistory)) return undefined;
+  const hookResult = await spawnResearchHook(
+    policy.hookCommand,
+    agentCwd,
+    policy.timeoutMs ?? 30_000,
+  );
+  if (!hookResult.success) return undefined;
+  const researchContext = [
+    hookResult.steerMessage,
+    hookResult.adaptationPlan,
+    ...(hookResult.citations ?? []),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const open = openBlockingFindings(context.state.findings, stage.id);
+  return `Research-informed repair. Use the research below to break through the current stagnation.\n\nRESEARCH OUTPUT\n${researchContext}\n\n${repairPrompt(stage, context.state, `Apply research insights to address the stagnant findings. Open findings:\n${formatOpenFindings(open)}`)}` ;
 }
 
 function requiredStageState(state: RunState, id: string): StageRunState {
@@ -926,6 +1178,10 @@ async function readOptionalJson(file: string): Promise<unknown | undefined> {
 }
 
 async function emit(context: RunnerContext, type: string, message: string, stageId?: string): Promise<void> {
+  // Update lease heartbeat on every event (stage transitions)
+  if (context.state.lease) {
+    context.state.lease.heartbeatAt = new Date().toISOString();
+  }
   await appendRunEvent(context.repositoryRoot, context.state.id, { type, message, stageId });
   await context.onEvent?.({ type, message, stageId });
 }

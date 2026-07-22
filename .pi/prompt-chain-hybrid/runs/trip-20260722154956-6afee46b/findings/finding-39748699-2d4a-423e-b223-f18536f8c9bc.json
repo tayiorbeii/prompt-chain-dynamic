@@ -1,0 +1,15 @@
+{
+  "id": "finding-39748699-2d4a-423e-b223-f18536f8c9bc",
+  "runId": "trip-20260722154956-6afee46b",
+  "stageId": "implement-slice-1-data-model-foundation",
+  "attempt": 5,
+  "source": "worker",
+  "severity": "major",
+  "blocking": true,
+  "summary": "Verified src/types.ts already repairs the typed data-model contract: attempts is AttemptRecord[], scheduling reasons provide five variants, RunLease provides four fields, AttemptRecord includes asi and status, and reconciled policy/settings",
+  "evidence": "Verified src/types.ts already repairs the typed data-model contract: attempts is AttemptRecord[], scheduling reasons provide five variants, RunLease provides four fields, AttemptRecord includes asi and status, and reconciled policy/settings additions are exported. src/types.ts passes isolated strict TypeScript compilation and git diff --check. Full compilation cannot pass until the runner-owned numeric attempts counter is migrated; the exact npx command also cannot run because TypeScript is not installed locally.",
+  "affectedPaths": [],
+  "disposition": "open",
+  "createdAt": "2026-07-22T16:01:52.184Z",
+  "updatedAt": "2026-07-22T16:01:52.184Z"
+}

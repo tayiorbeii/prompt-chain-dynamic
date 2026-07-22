@@ -7,6 +7,8 @@ import { createIssue, processNextIssue, resumeIssue } from "./controller.ts";
 import { projectIssues, readIssueEvents } from "./issues.ts";
 import { repositoryRoot } from "./git.ts";
 import { recordHumanDecision, requestAbort, resumeRun, runManifestFile } from "./runner.ts";
+import { Supervisor } from "./supervisor.ts";
+import { auditCompletion } from "./audit.ts";
 import { loadRunState } from "./store.ts";
 import { validateManifest } from "./validation.ts";
 import type { TripManifest } from "./types.ts";
@@ -194,6 +196,61 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
           onEvent: (message) => ctx.ui.setStatus("prompt-chain-hybrid-loop", message.slice(0, 100)),
         });
         ctx.ui.notify(result.message, result.run?.status === "completed" ? "info" : "warning");
+      } catch (error) {
+        ctx.ui.notify(errorMessage(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("prompt-chain-supervise", {
+    description: "Run a Prompt-chain hybrid manifest under continuous supervisor until terminal state",
+    handler: async (args, ctx) => {
+      const tokens = shellWords(args);
+      const humanDecisions = removeFlag(tokens, "--human-decisions");
+      const manifestPath = tokens[0];
+      if (!manifestPath) return ctx.ui.notify("Usage: /prompt-chain-supervise <manifest.json> [--human-decisions]", "warning");
+      ctx.ui.setStatus("prompt-chain-hybrid", "Starting supervised Prompt-chain run…");
+      try {
+        const repository = await repositoryRoot(ctx.cwd);
+        const initial = await runManifestFile({
+          manifestPath: path.resolve(ctx.cwd, manifestPath),
+          humanDecisions,
+          onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
+        });
+        let state = initial;
+        if (state.status !== "completed" && state.status !== "failed" && state.status !== "aborted") {
+          const supervisor = new Supervisor({
+            repositoryRoot: repository,
+            runId: state.id,
+            onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
+          });
+          state = await supervisor.start();
+        }
+        ctx.ui.setStatus("prompt-chain-hybrid", `${state.id}: ${state.status}`);
+        ctx.ui.notify(formatRunSummary(state), state.status === "completed" ? "info" : state.status === "paused" ? "warning" : "error");
+      } catch (error) {
+        ctx.ui.setStatus("prompt-chain-hybrid", "Supervised run failed");
+        ctx.ui.notify(errorMessage(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("prompt-chain-audit", {
+    description: "Audit a completed Prompt-chain hybrid run: map each acceptance criterion to its artifacts",
+    handler: async (args, ctx) => {
+      try {
+        const repository = await repositoryRoot(ctx.cwd);
+        const runId = args.trim() || await latestRunId(repository);
+        if (!runId) return ctx.ui.notify("Usage: /prompt-chain-audit <run-id>", "warning");
+        const state = await loadRunState(repository, runId);
+        const result = await auditCompletion(repository, state);
+        const lines = [
+          `Audit: ${result.passed ? "PASS" : "FAIL"} (${result.criteria.filter((c) => c.passed).length}/${result.criteria.length} criteria passed)`,
+          "",
+          ...result.criteria.map((c) => `${c.passed ? "✓" : "✗"} [${c.stageId}] ${c.criterion}${c.reason ? ` — ${c.reason}` : ""}`),
+          ...(result.unmapped.length ? ["", `Unmapped (${result.unmapped.length}):`, ...result.unmapped.map((u) => `  · ${u}`)] : []),
+        ];
+        ctx.ui.notify(lines.join("\n"), result.passed ? "info" : "warning");
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
       }

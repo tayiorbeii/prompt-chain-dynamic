@@ -1,0 +1,18 @@
+{
+  "id": "finding-5ceac3a2-c01d-49fa-9422-99480e8f3724",
+  "runId": "trip-20260722154956-6afee46b",
+  "stageId": "implement-slice-1-data-model-foundation",
+  "attempt": 1,
+  "source": "independent-review",
+  "severity": "major",
+  "blocking": true,
+  "summary": "The required TypeScript compilation criterion has no passing evidence.",
+  "evidence": "The plan specifies `npx tsc --noEmit`; its actual invocation exited 1 with “This is not the tsc command you are looking for.” `npm ls typescript --depth=0` reports an empty dependency tree, so the compilation acceptance criterion remains unverified.",
+  "suggestedRemediation": "Make the TypeScript compiler available through the project dependencies or the validation environment, then run and retain a successful `npx tsc --noEmit` result.",
+  "affectedPaths": [
+    "src/types.ts"
+  ],
+  "disposition": "open",
+  "createdAt": "2026-07-22T15:55:01.863Z",
+  "updatedAt": "2026-07-22T15:55:01.863Z"
+}

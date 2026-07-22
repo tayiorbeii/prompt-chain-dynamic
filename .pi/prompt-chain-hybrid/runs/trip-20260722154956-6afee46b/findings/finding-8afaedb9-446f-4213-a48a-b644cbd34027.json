@@ -1,0 +1,19 @@
+{
+  "id": "finding-8afaedb9-446f-4213-a48a-b644cbd34027",
+  "runId": "trip-20260722154956-6afee46b",
+  "stageId": "implement-slice-1-data-model-foundation",
+  "attempt": 1,
+  "source": "independent-review",
+  "severity": "major",
+  "blocking": true,
+  "summary": "The required TypeScript compilation validation is not executable in this checkout.",
+  "evidence": "Running npx tsc --noEmit exits 1 with “This is not the tsc command you are looking for.” package.json defines check as tsc --noEmit but does not declare TypeScript, and neither node_modules/.bin/tsc nor node_modules/typescript/bin/tsc exists.",
+  "suggestedRemediation": "Provision TypeScript in the project/toolchain, then run the exact required command and confirm a zero-error result.",
+  "affectedPaths": [
+    "package.json",
+    "package-lock.json"
+  ],
+  "disposition": "open",
+  "createdAt": "2026-07-22T15:55:01.863Z",
+  "updatedAt": "2026-07-22T15:55:01.863Z"
+}

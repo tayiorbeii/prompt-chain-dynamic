@@ -1,0 +1,18 @@
+{
+  "id": "finding-aa6a5cf7-4f57-49b9-ba82-f63b5e00e39c",
+  "runId": "trip-20260722154956-6afee46b",
+  "stageId": "implement-slice-1-data-model-foundation",
+  "attempt": 1,
+  "source": "independent-review",
+  "severity": "major",
+  "blocking": true,
+  "summary": "StageRunState does not implement the required attempts array.",
+  "evidence": "src/types.ts:261-265 declares `attempts: any`, despite the approved slice requiring an attempts array on StageRunState. This accepts both the legacy numeric counter used by src/runner.ts and arbitrary invalid values, so downstream attempt-memory code receives neither an AttemptRecord[] API nor compiler protection.",
+  "suggestedRemediation": "Replace `any` with a deliberate, type-safe migration representation that exposes AttemptRecord[] (and adjust the planned counter migration at its owned slice), rather than using `any` to bypass the contract.",
+  "affectedPaths": [
+    "src/types.ts"
+  ],
+  "disposition": "open",
+  "createdAt": "2026-07-22T15:55:01.863Z",
+  "updatedAt": "2026-07-22T15:55:01.863Z"
+}

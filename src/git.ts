@@ -199,6 +199,43 @@ export async function createWorktree(repository: string, runId: string, stageId:
   return directory;
 }
 
+/**
+ * Creates a verified-stage checkpoint commit on a prompt-chain ref keyed by run ID.
+ * The commit is placed at refs/prompt-chain/runs/<runId>/stages/<stageId> — NOT on
+ * the user's working branch — so it preserves verified work without polluting history.
+ *
+ * Implementation:
+ *   1. git add -A  (stage all working-tree changes)
+ *   2. git write-tree  (capture the staged tree)
+ *   3. git reset HEAD  (unstage — working tree is preserved)
+ *   4. git commit-tree  (create a detached commit object with trailers)
+ *   5. git update-ref  (point the special ref at the new commit)
+ *
+ * Returns the commit hash.
+ */
+export async function createCheckpointCommit(
+  cwd: string,
+  runId: string,
+  stageId: string,
+  trailers: Record<string, string>,
+): Promise<string> {
+  const ref = `refs/prompt-chain/runs/${runId}/stages/${stageId}`;
+  // Stage all working-tree changes so write-tree captures them
+  await git(cwd, ["add", "-A"]);
+  const treeHash = await git(cwd, ["write-tree"]);
+  // Unstage — working tree is unchanged
+  await git(cwd, ["reset", "HEAD"]);
+  const parentHash = await currentHead(cwd);
+  const message = `checkpoint(${stageId}): verified stage commit`;
+  const commitArgs = ["commit-tree", treeHash, "-p", parentHash, "-m", message];
+  for (const [key, value] of Object.entries(trailers)) {
+    commitArgs.push("-m", `${key}: ${value}`);
+  }
+  const commitHash = (await git(cwd, commitArgs)).trim();
+  await git(cwd, ["update-ref", ref, commitHash]);
+  return commitHash;
+}
+
 export async function removeWorktree(repository: string, worktree: string): Promise<void> {
   await git(repository, ["worktree", "remove", "--force", worktree], 120_000);
 }

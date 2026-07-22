@@ -1,0 +1,15 @@
+{
+  "id": "finding-3249171c-78ba-49a5-b092-a2dd10213600",
+  "runId": "trip-20260722154956-6afee46b",
+  "stageId": "implement-slice-1-data-model-foundation",
+  "attempt": 3,
+  "source": "worker",
+  "severity": "major",
+  "blocking": true,
+  "summary": "Verified src/types.ts contains the required exported data-model definitions, including a strongly typed migration-compatible `AttemptRecord[] | LegacyAttemptCounter` attempts field, all five scheduling variants, all RunLease fields, and rec",
+  "evidence": "Verified src/types.ts contains the required exported data-model definitions, including a strongly typed migration-compatible `AttemptRecord[] | LegacyAttemptCounter` attempts field, all five scheduling variants, all RunLease fields, and reconciled continuation/research policies. `git diff --check` passes. Full type-checking with an ephemeral TypeScript compiler exposes nine required runner migrations: the existing numeric counter operations must move to a dedicated counter or narrow/migrate before using `attempts` as history. The exact `npx tsc --noEmit` remains unavailable because TypeScript is not provisioned in this checkout.",
+  "affectedPaths": [],
+  "disposition": "open",
+  "createdAt": "2026-07-22T15:59:11.828Z",
+  "updatedAt": "2026-07-22T15:59:11.828Z"
+}

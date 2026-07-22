@@ -10,6 +10,7 @@ import {
   selectNextReadyIssue,
 } from "./issues.ts";
 import { resumeRun, runManifestFile } from "./runner.ts";
+import { Supervisor } from "./supervisor.ts";
 import { repositoryRoot } from "./git.ts";
 import type { TripManifest } from "./types.ts";
 
@@ -53,12 +54,24 @@ export async function processNextIssue(options: ProcessIssueOptions): Promise<Pr
     ? issue.manifestPath
     : path.resolve(path.dirname(eventFile), issue.manifestPath);
   await options.onEvent?.(`Claimed ${issue.id}: ${issue.title}`);
-  const run = await runManifestFile({
+  let run = await runManifestFile({
     manifestPath,
     humanDecisions: options.humanDecisions,
     backend: options.backend,
     onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
   });
+  // If the run is not yet terminal, hand it to the supervisor to resume until done
+  if (run.status !== "completed" && run.status !== "failed" && run.status !== "aborted") {
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
+    const repository = await repositoryRoot(manifest.workingDirectory);
+    const supervisor = new Supervisor({
+      repositoryRoot: repository,
+      runId: run.id,
+      backend: options.backend,
+      onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
+    });
+    run = await supervisor.start();
+  }
   const terminalType = run.status === "completed"
     ? "issue.completed"
     : run.status === "paused"
@@ -121,12 +134,21 @@ export async function resumeIssue(
     : path.resolve(path.dirname(eventFile), issue.manifestPath);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
   const repository = await repositoryRoot(manifest.workingDirectory);
-  const run = await resumeRun({
+  let run = await resumeRun({
     repositoryRoot: repository,
     runId: issue.runId,
     backend: options.backend,
     onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
   });
+  if (run.status !== "completed" && run.status !== "failed" && run.status !== "aborted") {
+    const supervisor = new Supervisor({
+      repositoryRoot: repository,
+      runId: run.id,
+      backend: options.backend,
+      onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
+    });
+    run = await supervisor.start();
+  }
   const type = run.status === "completed" ? "issue.completed" : run.status === "paused" ? "issue.paused" : "issue.failed";
   await appendIssueEvent(eventFile, {
     issueId: issue.id,

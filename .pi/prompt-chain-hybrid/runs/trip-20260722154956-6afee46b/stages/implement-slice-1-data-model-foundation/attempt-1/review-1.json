@@ -1,0 +1,35 @@
+{
+  "status": "continue",
+  "risk": "high",
+  "rationale": "Review found two blocking issues. The diff adds the requested exported type declarations and all five StageSchedulingReason variants (src/types.ts:13-18), the four RunLease fields (src/types.ts:22-27), and all named AttemptRecord fields including asi and status (src/types.ts:29-41). However, StageRunState does not expose the required typed attempt-record array, and the mandated TypeScript validation cannot run because TypeScript is absent from the installed/project dependencies.",
+  "missingItems": [
+    "Change StageRunState.attempts from any to a typed AttemptRecord[] representation while preserving any required legacy counter through an explicitly named, typed compatibility field/migration.",
+    "Make the TypeScript compiler available, then run npx tsc --noEmit successfully."
+  ],
+  "recommendedFollowupPrompt": "Revise src/types.ts so StageRunState has a type-safe AttemptRecord[] attempts field (with any legacy numeric counter modeled separately if needed), then provision the repository's declared TypeScript validation toolchain and rerun npx tsc --noEmit.",
+  "findings": [
+    {
+      "severity": "major",
+      "blocking": true,
+      "summary": "StageRunState.attempts is untyped rather than the required AttemptRecord array.",
+      "evidence": "src/types.ts:261-265 declares attempts: any despite the approved slice explicitly requiring an attempts array on StageRunState. The comment documents an intentional bypass for the existing numeric runner counter; this removes compiler/IDE enforcement and lets subsequent attempt-memory code store either an invalid shape or a number without detection.",
+      "remediation": "Declare attempts as AttemptRecord[] and introduce a separately named, strongly typed legacy attempt counter (or a defined migration-compatible union plus narrowing) if the current runner still needs numeric behavior.",
+      "affectedPaths": [
+        "src/types.ts"
+      ]
+    },
+    {
+      "severity": "major",
+      "blocking": true,
+      "summary": "The required TypeScript compilation validation is not executable in this checkout.",
+      "evidence": "Running npx tsc --noEmit exits 1 with “This is not the tsc command you are looking for.” package.json defines check as tsc --noEmit but does not declare TypeScript, and neither node_modules/.bin/tsc nor node_modules/typescript/bin/tsc exists.",
+      "remediation": "Provision TypeScript in the project/toolchain, then run the exact required command and confirm a zero-error result.",
+      "affectedPaths": [
+        "package.json",
+        "package-lock.json"
+      ]
+    }
+  ],
+  "raw": "<status>continue</status>\n<risk>high</risk>\n<rationale>Review found two blocking issues. The diff adds the requested exported type declarations and all five StageSchedulingReason variants (src/types.ts:13-18), the four RunLease fields (src/types.ts:22-27), and all named AttemptRecord fields including asi and status (src/types.ts:29-41). However, StageRunState does not expose the required typed attempt-record array, and the mandated TypeScript validation cannot run because TypeScript is absent from the installed/project dependencies.</rationale>\n<recommendedFollowupPrompt>Revise src/types.ts so StageRunState has a type-safe AttemptRecord[] attempts field (with any legacy numeric counter modeled separately if needed), then provision the repository's declared TypeScript validation toolchain and rerun npx tsc --noEmit.</recommendedFollowupPrompt>\n<structured-json>{\"status\":\"continue\",\"risk\":\"high\",\"rationale\":\"Review found two blocking issues. The diff adds the requested exported type declarations and all five StageSchedulingReason variants (src/types.ts:13-18), the four RunLease fields (src/types.ts:22-27), and all named AttemptRecord fields including asi and status (src/types.ts:29-41). However, StageRunState does not expose the required typed attempt-record array, and the mandated TypeScript validation cannot run because TypeScript is absent from the installed/project dependencies.\",\"missingItems\":[\"Change StageRunState.attempts from any to a typed AttemptRecord[] representation while preserving any required legacy counter through an explicitly named, typed compatibility field/migration.\",\"Make the TypeScript compiler available, then run npx tsc --noEmit successfully.\"],\"recommendedFollowupPrompt\":\"Revise src/types.ts so StageRunState has a type-safe AttemptRecord[] attempts field (with any legacy numeric counter modeled separately if needed), then provision the repository's declared TypeScript validation toolchain and rerun npx tsc --noEmit.\",\"findings\":[{\"severity\":\"major\",\"blocking\":true,\"summary\":\"StageRunState.attempts is untyped rather than the required AttemptRecord array.\",\"evidence\":\"src/types.ts:261-265 declares attempts: any despite the approved slice explicitly requiring an attempts array on StageRunState. The comment documents an intentional bypass for the existing numeric runner counter; this removes compiler/IDE enforcement and lets subsequent attempt-memory code store either an invalid shape or a number without detection.\",\"remediation\":\"Declare attempts as AttemptRecord[] and introduce a separately named, strongly typed legacy attempt counter (or a defined migration-compatible union plus narrowing) if the current runner still needs numeric behavior.\",\"affectedPaths\":[\"src/types.ts\"]},{\"severity\":\"major\",\"blocking\":true,\"summary\":\"The required TypeScript compilation validation is not executable in this checkout.\",\"evidence\":\"Running npx tsc --noEmit exits 1 with “This is not the tsc command you are looking for.” package.json defines check as tsc --noEmit but does not declare TypeScript, and neither node_modules/.bin/tsc nor node_modules/typescript/bin/tsc exists.\",\"remediation\":\"Provision TypeScript in the project/toolchain, then run the exact required command and confirm a zero-error result.\",\"affectedPaths\":[\"package.json\",\"package-lock.json\"]}]}</structured-json>",
+  "malformed": false
+}
