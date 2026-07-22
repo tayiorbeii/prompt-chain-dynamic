@@ -7,6 +7,9 @@ node_modules/
 # Research artifacts
 .research/
 
+# Prompt-chain runtime run state (transient, not source)
+.pi/prompt-chain-hybrid/runs/
+
 # Environment files
 .env
 .env.*

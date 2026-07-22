@@ -1,5 +1,0 @@
-<status>complete</status>
-<risk>low</risk>
-<rationale>Added exported recovery data-model types, manifest policies, stage scheduling/attempt metadata, lease support, and forward-compatible decision provenance in src/types.ts. TypeScript compilation passed via TypeScript 5.7.3.</rationale>
-<recommendedFollowupPrompt>Implement Slice 2 scheduler semantics and ownership leases in src/runner.ts.</recommendedFollowupPrompt>
-<structured-json>{"status":"complete","risk":"low","rationale":"Added exported recovery data-model types, manifest policies, stage scheduling/attempt metadata, lease support, and forward-compatible decision provenance in src/types.ts. TypeScript compilation passed via TypeScript 5.7.3.","summary":"Validated with `npx --yes --package typescript@5.7.3 tsc --noEmit` and `git diff --check -- src/types.ts`.","missingItems":[],"recommendedFollowupPrompt":"Implement Slice 2 scheduler semantics and ownership leases in src/runner.ts.","findings":[]}</structured-json>
