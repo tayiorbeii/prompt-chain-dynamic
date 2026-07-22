@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Packaged tarballs
+*.tgz
+
+# Research artifacts
+.research/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# macOS
+.DS_Store
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

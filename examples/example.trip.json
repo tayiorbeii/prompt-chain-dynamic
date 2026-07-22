@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "name": "Stable Parent Cluster Navigation",
+  "workingDirectory": "/absolute/path/to/your/repository",
+  "metadata": {
+    "generator": {
+      "name": "durable-trip-plan-compiler",
+      "version": "0.1.0"
+    },
+    "requestedMode": "auto",
+    "selectedTopology": "worktree-fanout",
+    "topologyReasons": [
+      "Both slices explicitly declare parallel safety",
+      "Concrete path claims are non-overlapping"
+    ]
+  },
+  "settings": {
+    "maxParallel": 2,
+    "failFast": false,
+    "autoCommit": true,
+    "decisionPolicy": {
+      "mode": "agent",
+      "maxDecisionRounds": 2,
+      "requireBestEffortDecision": true,
+      "prepareHumanRecommendation": true
+    },
+    "reviewPolicy": {
+      "required": true,
+      "reviewerCount": 2,
+      "maxRepairRounds": 4,
+      "malformedVerdict": "continue",
+      "requireFreshClosureReviewer": true
+    },
+    "finalValidationCommands": [
+      "npm test",
+      "npm run typecheck",
+      "git diff --check"
+    ]
+  },
+  "stages": [
+    {
+      "id": "research",
+      "type": "review",
+      "needs": [],
+      "isolation": "readonly",
+      "prompt": "Read the plan, VISION.md, ARCHI.md, and repository instructions. Confirm scope and risks. Do not edit files."
+    },
+    {
+      "id": "implement-stable-order",
+      "type": "implementation",
+      "needs": ["research"],
+      "isolation": "worktree",
+      "parallel": true,
+      "prompt": "Implement stable original ordering. Do not commit. Return a structured status.",
+      "allowedPaths": ["src/cluster-order.ts"],
+      "claimedPaths": ["src/cluster-order.ts"],
+      "outputs": []
+    },
+    {
+      "id": "implement-regression-test",
+      "type": "implementation",
+      "needs": ["research"],
+      "isolation": "worktree",
+      "parallel": true,
+      "prompt": "Add the exclude/include regression test. Do not commit. Return a structured status.",
+      "allowedPaths": ["src/cluster-order.test.ts"],
+      "claimedPaths": ["src/cluster-order.test.ts"],
+      "outputs": []
+    },
+    {
+      "id": "integrate",
+      "type": "integration",
+      "needs": ["implement-stable-order", "implement-regression-test"],
+      "isolation": "same-checkout",
+      "integrationStrategy": "worktree-fan-in",
+      "prompt": "Apply verified worker patches, run final validation, and leave commit creation to the runtime.",
+      "allowedPaths": ["src/cluster-order.ts", "src/cluster-order.test.ts"],
+      "outputs": []
+    }
+  ]
+}

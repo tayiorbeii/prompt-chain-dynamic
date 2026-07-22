@@ -1,0 +1,55 @@
+{
+  "name": "prompt-chain-dynamic-runtime",
+  "version": "0.2.0",
+  "description": "Prompt-chain JSON contracts executed by pi-dynamic-workflows with durable Git transactions and feedback closure",
+  "type": "module",
+  "private": false,
+  "keywords": [
+    "agent-workflow",
+    "dag",
+    "git-transaction",
+    "pi",
+    "pi-dynamic-workflows",
+    "pi-package",
+    "prompt-chain",
+    "trip",
+    "workflow-engine"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.10"
+  },
+  "scripts": {
+    "test": "npm run check && node --experimental-strip-types --test tests/*.test.ts",
+    "validate:example": "node --experimental-strip-types bin/trip-validate.ts examples/example.trip.json",
+    "compile:example": "node --experimental-strip-types bin/trip-compile.ts examples/example.plan.md --out examples/generated.trip.json --working-directory . --mode auto",
+    "smoke": "bash scripts/smoke.sh",
+    "check": "tsc --noEmit"
+  },
+  "bin": {
+    "prompt-chain": "./bin/prompt-chain.ts",
+    "trip-compile": "./bin/trip-compile.ts",
+    "trip-validate": "./bin/trip-validate.ts",
+    "trip-headless": "./bin/trip-headless.ts",
+    "trip-loop": "./bin/trip-loop.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.80.10",
+    "@quintinshaw/pi-dynamic-workflows": "file:./vendor/quintinshaw-pi-dynamic-workflows-3.3.0.tgz",
+    "typebox": "^1.3.6"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@types/node": "^22"
+  }
+}

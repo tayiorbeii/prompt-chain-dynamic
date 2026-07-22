@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "targeted": {
+    "default": ["git diff --check"]
+  },
+  "final": {
+    "low": ["git diff --check"],
+    "medium": ["git diff --check"],
+    "high": ["git diff --check"],
+    "critical": ["git diff --check"]
+  },
+  "humanReleaseApproval": [
+    "authentication",
+    "authorization",
+    "billing",
+    "deletion",
+    "migration",
+    "secrets",
+    "dependency-addition",
+    "public-api-break",
+    "infrastructure",
+    "irreversible-external-effect"
+  ]
+}
