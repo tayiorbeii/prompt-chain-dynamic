@@ -211,6 +211,64 @@ test("resumeRun with a stale generation returns current state without side effec
   assert.equal(returned.status, initial.status, "stale generation should not change run status");
 });
 
+test("consecutive non-progress limit pauses the stage after maxConsecutiveFailures non-completing rounds", async () => {
+  // A backend that always returns "continue" — every attempt is a discard.
+  // With maxConsecutiveFailures: 3, the stage should pause after 3 consecutive
+  // non-completing rounds rather than exhausting all repair rounds.
+  const repository = await createRepository();
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Consecutive limit",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      reviewPolicy: { required: true, reviewerCount: 1, maxRepairRounds: 10, malformedVerdict: "continue", requireFreshClosureReviewer: false },
+      continuationPolicy: { maxConsecutiveFailures: 3 },
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      {
+        id: "impl",
+        type: "implementation",
+        needs: ["research"],
+        isolation: "same-checkout",
+        prompt: "Implement",
+        allowedPaths: ["src/x.ts"],
+        claimedPaths: ["src/x.ts"],
+      },
+      {
+        id: "integrate",
+        type: "integration",
+        needs: ["impl"],
+        isolation: "same-checkout",
+        integrationStrategy: "same-checkout-finalize",
+        prompt: "Integrate",
+        allowedPaths: ["src/**"],
+      },
+    ],
+  };
+  const manifestPath = path.join(os.tmpdir(), `limit-manifest-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  let implementationAttempts = 0;
+  class AlwaysContinueBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Research complete.");
+      if (request.stageId === "impl") {
+        implementationAttempts++;
+        // Never complete — always return continue
+        return result("<status>continue</status><risk>low</risk><rationale>Still working.</rationale>");
+      }
+      return result("<status>complete</status><risk>low</risk><rationale>OK.</rationale>");
+    }
+  }
+  const state = await runManifestFile({ manifestPath, backend: new AlwaysContinueBackend() });
+  assert.equal(state.status, "paused", `expected paused, got ${state.status}: ${state.pauseReason}`);
+  assert.equal(state.pauseKind, "review_blocked");
+  // Should have paused after 3 consecutive non-completing rounds, not 10
+  assert.ok(implementationAttempts <= 4, `expected at most 4 attempts (1 impl + 3 repairs), got ${implementationAttempts}`);
+});
+
 test("resumeRun with current generation increments the lease generation", async () => {
   const { writeRunState } = await import("../src/store.ts");
   const repository = await createRepository();

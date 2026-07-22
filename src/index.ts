@@ -211,7 +211,6 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
       if (!manifestPath) return ctx.ui.notify("Usage: /prompt-chain-supervise <manifest.json> [--human-decisions]", "warning");
       ctx.ui.setStatus("prompt-chain-hybrid", "Starting supervised Prompt-chain run…");
       try {
-        const repository = await repositoryRoot(ctx.cwd);
         const initial = await runManifestFile({
           manifestPath: path.resolve(ctx.cwd, manifestPath),
           humanDecisions,
@@ -219,6 +218,9 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
         });
         let state = initial;
         if (state.status !== "completed" && state.status !== "failed" && state.status !== "aborted") {
+          // Derive the repository root from the manifest's workingDirectory, not ctx.cwd,
+          // so the supervisor loads state from the correct .pi directory.
+          const repository = await repositoryRoot(state.manifest.workingDirectory);
           const supervisor = new Supervisor({
             repositoryRoot: repository,
             runId: state.id,

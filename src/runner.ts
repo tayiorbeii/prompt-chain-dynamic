@@ -30,9 +30,9 @@ import {
   openBlockingFindings,
   synthesizeReviews,
 } from "./review.ts";
-import { autoApproveAmendment, buildDecisionPrompt, decisionRequestFromReview, parseDecision } from "./decision.ts";
-import { hashContract, buildAmendmentProposal } from "./contract.ts";
-import { isStagnant, stagnationFingerprint } from "./stagnation.ts";
+import { buildDecisionPrompt, decisionRequestFromReview, parseDecision } from "./decision.ts";
+import { hashContract } from "./contract.ts";
+import { isStagnant } from "./stagnation.ts";
 import { spawnResearchHook } from "./research-hook.ts";
 import {
   appendRunEvent,
@@ -44,7 +44,7 @@ import {
   writeArtifact,
   writeRunState,
 } from "./store.ts";
-import { assertValidManifest, validateManifest } from "./validation.ts";
+import { assertValidManifest } from "./validation.ts";
 import { DynamicWorkflowBackend } from "./dynamic-backend.ts";
 import type {
   AgentBackend,
@@ -136,7 +136,8 @@ export async function runManifestFile(options: RunOptions): Promise<RunState> {
       owner: id,
       generation: 1,
       heartbeatAt: now,
-      leaseTimeoutMs: manifest.settings?.continuationPolicy?.retryIntervalMs ?? 120_000,
+      // 120 s — long enough for a slow stage turn, short enough to detect dead runs
+      leaseTimeoutMs: 120_000,
     },
   };
   await initializeRunStorage(repository, id);
@@ -405,13 +406,16 @@ async function runWriterStage(
 
   const maximumRounds = context.manifest.settings?.reviewPolicy?.maxRepairRounds ?? 4;
   const maxConsecutiveFailures = context.manifest.settings?.continuationPolicy?.maxConsecutiveFailures ?? 5;
-  let consecutiveFailures = 0;
+  // Counts consecutive non-completing attempts (discards + checks_failed).
+  // Reset when the stage passes validation (any real progress). Crashes throw
+  // immediately and bypass this counter.
+  let consecutiveNonProgress = 0;
   // Track whether we've already triggered a research escalation for this stage
   let researchEscalated = false;
 
   while (stageState.reviewRounds <= maximumRounds) {
-    if (consecutiveFailures >= maxConsecutiveFailures) {
-      throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} paused after ${maxConsecutiveFailures} consecutive failures.`);
+    if (consecutiveNonProgress >= maxConsecutiveFailures) {
+      throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} paused after ${maxConsecutiveFailures} consecutive non-completing attempts.`);
     }
     if (context.state.abortRequested) throw new PauseRun("blocked", stage.id, "Abort requested; stopped before the next agent attempt.");
 
@@ -445,7 +449,6 @@ async function runWriterStage(
       throw new Error(result.error ?? `${role} agent failed`);
     }
 
-    consecutiveFailures = 0;
     const headAfter = await currentHead(gitRoot);
     if (headAfter !== headBefore) throw new Error(`agent created a direct commit in ${stage.id}; the runtime is the only commit authority`);
     const attemptDelta = await calculateStageDelta(gitRoot, beforeAttempt);
@@ -468,10 +471,11 @@ async function runWriterStage(
         contractHash: stageState.contractHash,
       };
       attemptHistory.push(discardRecord);
+      consecutiveNonProgress++;
       stageState.reviewRounds += 1;
       if (stageState.reviewRounds > maximumRounds) {
         const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
-        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
+        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; consecutiveNonProgress = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
         throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved feedback.`);
       }
       nextPrompt = repairPrompt(stage, context.state, direction);
@@ -498,10 +502,11 @@ async function runWriterStage(
         contractHash: stageState.contractHash,
       };
       attemptHistory.push(checksFailedRecord);
+      consecutiveNonProgress++;
       stageState.reviewRounds += 1;
       if (stageState.reviewRounds > maximumRounds) {
         const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
-        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
+        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; consecutiveNonProgress = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
         throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} validation remained red after ${maximumRounds} repair rounds.`);
       }
       nextPrompt = repairPrompt(stage, context.state, "Fix the deterministic validation failures exactly; do not expand scope.");
@@ -516,7 +521,9 @@ async function runWriterStage(
       const finalDelta = await calculateStageDelta(gitRoot, stageStart);
       enforcePathContract(context, stage, finalDelta.changedDuring);
       stageState.changedPaths = finalDelta.changedDuring;
-      const diffHash = sha256(await captureBinaryPatch(gitRoot));
+      // Capture the patch once; reuse for diffHash and for the artifact in persistWriterBoundary.
+      const verifiedPatch = await captureBinaryPatch(gitRoot);
+      const diffHash = sha256(verifiedPatch);
       const keepRecord: AttemptRecord = {
         attempt: attemptNum,
         role,
@@ -543,7 +550,8 @@ async function runWriterStage(
       if (openBlockingFindings(context.state.findings, stage.id).length) {
         throw new Error(`stage ${stage.id} cannot complete with unresolved blocking findings`);
       }
-      await persistWriterBoundary(context, stage, stageState, gitRoot, attemptNum, validation);
+      consecutiveNonProgress = 0;
+      await persistWriterBoundary(context, stage, stageState, gitRoot, attemptNum, verifiedPatch);
       return;
     }
 
@@ -562,12 +570,13 @@ async function runWriterStage(
       contractHash: stageState.contractHash,
     };
     attemptHistory.push(reviewDiscardRecord);
-    stageState.reviewRounds += 1;
-    if (stageState.reviewRounds > maximumRounds) {
-      const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
-      if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
-      throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved review findings.`);
-    }
+      consecutiveNonProgress++;
+      stageState.reviewRounds += 1;
+      if (stageState.reviewRounds > maximumRounds) {
+        const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
+        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; consecutiveNonProgress = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
+        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved review findings.`);
+      }
     nextPrompt = repairPrompt(stage, context.state, direction);
   }
   throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} did not reach a verified completion boundary.`);
@@ -750,9 +759,9 @@ async function persistWriterBoundary(
   stageState: StageRunState,
   gitRoot: string,
   attemptNum: number,
-  validation: ValidationResult[],
+  /** Pre-captured binary patch buffer from the verified stage — avoids a redundant git-diff call. */
+  patch: Buffer,
 ): Promise<void> {
-  const patch = await captureBinaryPatch(gitRoot);
   const relative = `stages/${stage.id}/${stage.isolation === "worktree" ? "patch.diff" : "cumulative.patch.diff"}`;
   const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, relative, patch);
   const digest = sha256(patch);
@@ -1071,7 +1080,7 @@ async function tryResearchEscalation(
     .filter(Boolean)
     .join("\n\n");
   const open = openBlockingFindings(context.state.findings, stage.id);
-  return `Research-informed repair. Use the research below to break through the current stagnation.\n\nRESEARCH OUTPUT\n${researchContext}\n\n${repairPrompt(stage, context.state, `Apply research insights to address the stagnant findings. Open findings:\n${formatOpenFindings(open)}`)}` ;
+  return `Research-informed repair. Use the research below to break through the current stagnation.\n\nRESEARCH OUTPUT\n${researchContext}\n\n${repairPrompt(stage, context.state, `Apply research insights to address the stagnant findings. Open findings:\n${formatOpenFindings(open)}`)}`;
 }
 
 function requiredStageState(state: RunState, id: string): StageRunState {
