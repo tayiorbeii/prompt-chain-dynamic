@@ -359,19 +359,28 @@ async function showStatusSummary(
   ctx: ExtensionCommandContext,
   summary: string,
 ): Promise<void> {
-  const pageSize = 16;
+  const viewHeight = 14;
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-    let page = 0;
+    let offset = 0;
+    let maxOffset = 0;
     const renderLines = (width: number): string[] => {
-      const lines = wrapStatusSummary(summary, Math.max(1, width - 4));
-      const pageCount = Math.max(1, Math.ceil(lines.length / pageSize));
-      page = Math.min(page, pageCount - 1);
-      const start = page * pageSize;
+      const innerWidth = Math.max(1, width - 4);
+      const lines = wrapStatusSummary(summary, innerWidth);
+      maxOffset = Math.max(0, lines.length - viewHeight);
+      offset = Math.min(offset, maxOffset);
+      const border = theme.fg("accent", `┌${"─".repeat(innerWidth + 2)}┐`);
+      const divider = theme.fg("accent", `├${"─".repeat(innerWidth + 2)}┤`);
+      const row = (text: string, style: (value: string) => string = (value) => value): string =>
+        `│ ${style(text.slice(0, innerWidth).padEnd(innerWidth))} │`;
+      const visible = lines.slice(offset, offset + viewHeight);
       return [
-        theme.fg("accent", theme.bold("Prompt-chain status")),
-        theme.fg("dim", `Page ${page + 1}/${pageCount} · ↑/↓ or j/k to navigate · enter/esc to close`),
-        "",
-        ...lines.slice(start, start + pageSize),
+        border,
+        row("Prompt-chain status", (value) => theme.fg("accent", theme.bold(value))),
+        row(`Lines ${offset + 1}-${Math.min(offset + viewHeight, lines.length)} of ${lines.length} · ↑/↓ or j/k scroll · enter/esc close`, (value) => theme.fg("dim", value)),
+        divider,
+        ...visible.map((line) => row(line)),
+        ...Array.from({ length: viewHeight - visible.length }, () => row("")),
+        border.replace("┌", "└").replace("┐", "┘"),
       ];
     };
     return {
@@ -379,10 +388,12 @@ async function showStatusSummary(
       invalidate: () => {},
       handleInput: (data: string) => {
         if (data === "\u001b" || data === "\r" || data === "\n") return done();
-        if (data === "\u001b[B" || data === "j" || data === " ") page += 1;
-        else if (data === "\u001b[A" || data === "k") page = Math.max(0, page - 1);
-        else if (data === "\u001b[6~") page += 1;
-        else if (data === "\u001b[5~") page = Math.max(0, page - 1);
+        if (data === "\u001b[B" || data === "j") offset = Math.min(maxOffset, offset + 1);
+        else if (data === "\u001b[A" || data === "k") offset = Math.max(0, offset - 1);
+        else if (data === " " || data === "\u001b[6~") offset = Math.min(maxOffset, offset + viewHeight);
+        else if (data === "\u001b[5~") offset = Math.max(0, offset - viewHeight);
+        else if (data === "g" || data === "\u001b[H") offset = 0;
+        else if (data === "G" || data === "\u001b[F") offset = maxOffset;
         else return;
         tui.requestRender();
       },
