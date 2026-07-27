@@ -103,7 +103,7 @@ docs/REVIEW-CHECKLIST.md
 /prompt-chain-abort [run-id]
 ```
 
-`/prompt-chain-status` reports when the status was requested; run creation, start, update, completion, and elapsed times; lease freshness and abort state; plus per-step task, dependency, timing, attempt, validation, blocker, changed-path, worktree, patch, and verified-commit details. A terminally aborted run cannot display a stale running step as active; it is labeled as interrupted. Add `--watch` to open a live, auto-refreshing view of the run's durable `events.jsonl` log; use `f` to follow new lines, `r` to refresh, arrows or `j`/`k` to scroll, and Enter/Escape to close.
+`/prompt-chain-status` reports when the status was requested; run creation, start, update, completion, and elapsed times; lease freshness and abort state; plus per-step task, dependency, timing, attempt, validation, blocker, changed-path, worktree, patch, and verified-commit details. A terminally aborted run cannot display a stale running step as active; it is labeled as interrupted. Add `--watch` to open a live, auto-refreshing view of the run's durable `events.jsonl` log. Newest events are shown at the top while following; use `f` to return to them, `r` to refresh, arrows or `j`/`k` to browse older entries, and Enter/Escape to close.
 
 `/prompt-chain-abort` is durable across Pi processes. Active workers observe the request at the next attempt boundary, while an expired worker lease is aborted immediately. An explicit `/prompt-chain-resume` reopens an aborted run, validates and preserves its in-contract checkout changes, clears the abort request, atomically claims the next lease generation, and continues the interrupted stage. A live lease rejects concurrent resume attempts.
 

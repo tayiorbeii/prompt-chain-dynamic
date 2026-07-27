@@ -10,7 +10,7 @@ import { recordHumanDecision, requestAbort, resumeRun, runManifestFile } from ".
 import { Supervisor } from "./supervisor.ts";
 import { auditCompletion } from "./audit.ts";
 import { loadRunState } from "./store.ts";
-import { readRunEvents, formatRunEvent } from "./logs.ts";
+import { readRunEvents, formatRunEventsNewestFirst } from "./logs.ts";
 import { formatRunSummary } from "./status.ts";
 import { validateManifest } from "./validation.ts";
 import type { TripManifest } from "./types.ts";
@@ -424,8 +424,8 @@ async function showRunLogWatcher(
     const refresh = async (): Promise<void> => {
       try {
         const events = await readRunEvents(repository, runId);
-        lines = events.length ? events.map(formatRunEvent) : ["No durable events have been recorded yet."];
-        if (follow) offset = Math.max(0, lines.length - viewHeight);
+        lines = events.length ? formatRunEventsNewestFirst(events) : ["No durable events have been recorded yet."];
+        if (follow) offset = 0;
       } catch (error) {
         lines = [`Unable to read the durable event log: ${errorMessage(error)}`];
         offset = 0;
@@ -453,7 +453,7 @@ async function showRunLogWatcher(
       return [
         border,
         row(`Prompt-chain logs — ${runId}`, (value) => theme.fg("accent", theme.bold(value))),
-        row(`${follow ? "Following" : "Paused"} · lines ${offset + 1}-${Math.min(offset + viewHeight, wrapped.length)} of ${wrapped.length} · ↑/↓ scroll · f follow · r refresh · enter/esc close`, (value) => theme.fg("dim", value)),
+        row(`${follow ? "Following newest" : "Browsing history"} · lines ${offset + 1}-${Math.min(offset + viewHeight, wrapped.length)} of ${wrapped.length} · ↑/↓ scroll · f follow · r refresh · enter/esc close`, (value) => theme.fg("dim", value)),
         divider,
         ...visible.map((line) => row(line)),
         ...Array.from({ length: viewHeight - visible.length }, () => row("")),
@@ -467,19 +467,19 @@ async function showRunLogWatcher(
         if (data === "\u001b" || data === "\r" || data === "\n") return close();
         if (data === "\u001b[B" || data === "j") {
           offset = Math.min(maxOffset, offset + 1);
-          follow = offset === maxOffset;
+          follow = false;
         } else if (data === "\u001b[A" || data === "k") {
           offset = Math.max(0, offset - 1);
-          follow = false;
+          follow = offset === 0;
         } else if (data === " " || data === "\u001b[6~") {
           offset = Math.min(maxOffset, offset + viewHeight);
-          follow = offset === maxOffset;
+          follow = false;
         } else if (data === "\u001b[5~") {
           offset = Math.max(0, offset - viewHeight);
-          follow = false;
+          follow = offset === 0;
         } else if (data === "f") {
           follow = true;
-          offset = maxOffset;
+          offset = 0;
         } else if (data === "r") {
           void refresh();
         } else return;

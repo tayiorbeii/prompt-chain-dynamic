@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { formatRunEvent, readRunEvents } from "../src/logs.ts";
+import { formatRunEvent, formatRunEventsNewestFirst, readRunEvents } from "../src/logs.ts";
 
 const runId = "trip-log-test";
 
@@ -36,6 +36,18 @@ test("readRunEvents returns an empty list before the durable event log exists", 
   } finally {
     await rm(repository, { recursive: true, force: true });
   }
+});
+
+test("formatRunEventsNewestFirst puts the latest durable event at the top", () => {
+  const output = formatRunEventsNewestFirst([
+    { timestamp: "2026-07-27T17:00:00.000Z", type: "stage.started" },
+    { timestamp: "2026-07-27T17:00:01.000Z", type: "stage.completed" },
+  ]);
+
+  assert.deepEqual(output, [
+    "17:00:01 stage.completed",
+    "17:00:00 stage.started",
+  ]);
 });
 
 test("formatRunEvent keeps timestamp, type, stage, message, and durable details visible", () => {

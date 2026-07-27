@@ -35,6 +35,11 @@ export async function readRunEvents(repositoryRoot: string, runId: string): Prom
     });
 }
 
+/** Format an append-only event stream for a tailing UI: newest events first. */
+export function formatRunEventsNewestFirst(events: RunLogEvent[]): string[] {
+  return [...events].reverse().map(formatRunEvent);
+}
+
 export function formatRunEvent(event: RunLogEvent): string {
   const timestamp = event.timestamp ? formatTimestamp(event.timestamp) : "--:--:--";
   const type = event.type ?? "event";
