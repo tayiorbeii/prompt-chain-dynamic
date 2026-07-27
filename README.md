@@ -39,7 +39,7 @@ Humans normally author Markdown. JSON is the frozen machine contract and may als
 - Required outputs and validation commands checked before review completion; known “no tests found” exit-0 output is rejected as a false green.
 - Typed structured output through `WorkflowAgent` and TypeBox.
 - Free-form corrective feedback defaults to `continue`, never completion.
-- Durable blocking finding ledger and same-stage repair loop.
+- Durable blocking finding ledger and same-stage repair loop with bounded recent attempt, validation, and review evidence carried into every repair.
 - Fresh independent reviewer ensemble after each repair.
 - Agent decisions by default; `--human-decisions` records the recommendation for later human review without wedging execution.
 - Redundant detached stale-lease reapers with atomic generation claims, so dead workers/reapers are automatically replaced without duplicate resumes.
@@ -215,7 +215,7 @@ agent output
        no: capture durable artifact and checkpoint
 ```
 
-`reviewPolicy.maxRepairRounds` is a focused-strategy window, not a terminal cap. When that window closes, the runtime automatically continues from the current worktree: evolving attempts enter another focused repair window, while stagnant attempts request configured research and otherwise receive a root-cause/re-plan prompt. Worker/check failures and reviewer-only churn have separate consecutive-failure rails. At either rail or the total automatic-attempt limit (`continuationPolicy.autoResumeTurnLimit`, default 30), the runtime ranks durable candidate patches, restores the strongest safe attempt, marks unresolved findings `follow-up-created`, writes per-stage and run-level `follow-ups.md`, and continues downstream work instead of pausing.
+Each repair and resumed-stage prompt includes bounded evidence from its most recent attempts: failed command output, review rationale/findings, and patch identity. The agent must use that evidence to avoid repeating an approach that left the same failure unresolved. `reviewPolicy.maxRepairRounds` is a focused-strategy window, not a terminal cap. When that window closes, the runtime automatically continues from the current worktree: evolving attempts enter another focused repair window, while stagnant attempts request configured research and otherwise receive a root-cause/re-plan prompt. Worker/check failures and reviewer-only churn have separate consecutive-failure rails. At either rail or the total automatic-attempt limit (`continuationPolicy.autoResumeTurnLimit`, default 30), the runtime ranks durable candidate patches, restores the strongest safe attempt, marks unresolved findings `follow-up-created`, writes per-stage and run-level `follow-ups.md`, and continues downstream work instead of pausing.
 
 The run lease is renewed periodically during long agent and reviewer calls. A detached reaper observes expiry and atomically resumes the interrupted stage. Every backend call has a runtime-owned wall-clock timeout, decision calls have a separate bounded timeout with an autonomous safest-option fallback, and heartbeat shutdown is bounded so a wedged lease write cannot wedge `finally`. Fresh reviews also reconcile the finding ledger so resolved historical findings do not accumulate in later repair prompts. Safety boundaries—out-of-contract writes, workspace drift, direct agent commits, and corrupt patch hashes—still stop rather than silently ship unsafe work.
 

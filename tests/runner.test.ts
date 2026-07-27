@@ -200,7 +200,10 @@ test("runtime continues automatically when progressive repairs exceed the focuse
   assert.equal(state.status, "completed", state.pauseReason);
   assert.equal(backend.repairCalls, 2, "the second repair must run beyond maxRepairRounds");
   assert.match(backend.repairPrompts[1] ?? "", /Cover the second behavior/);
-  assert.doesNotMatch(backend.repairPrompts[1] ?? "", /Fix the first behavior/);
+  assert.match(backend.repairPrompts[1] ?? "", /RECENT ATTEMPT EVIDENCE/);
+  assert.match(backend.repairPrompts[1] ?? "", /Attempt 1/);
+  assert.match(backend.repairPrompts[1] ?? "", /Fix the first behavior/);
+  assert.match(backend.repairPrompts[1] ?? "", /Do not repeat an approach that left the same failure unresolved/);
   assert.equal(state.findings.length, 2);
   assert.ok(state.findings.every((finding) => finding.disposition === "resolved"));
   assert.equal(await readFile(path.join(repository, "src", "x.ts"), "utf8"), "export const version = 3;\n");

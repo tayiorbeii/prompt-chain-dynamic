@@ -1153,6 +1153,7 @@ function validationFinding(
 function repairPrompt(stage: TripStage, state: RunState, direction: string): string {
   const findings = openBlockingFindings(state.findings, stage.id);
   const decision = latestDecisionDirection(state, stage.id);
+  const priorAttempts = formatRepairAttemptEvidence(state.stageStates[stage.id]?.attempts ?? []);
   return `Repair the current frozen stage. Do not advance to other work and do not expand scope. All in-contract edits from prior attempts remain in the working tree: inspect them, build on them, and preserve correct work rather than restarting from scratch.
 
 ORIGINAL STAGE
@@ -1161,11 +1162,16 @@ ${stage.prompt}
 OPEN BLOCKING FINDINGS
 ${formatOpenFindings(findings)}
 
+RECENT ATTEMPT EVIDENCE
+${priorAttempts}
+
 DECISION DIRECTION
 ${decision ?? direction}
 
 REQUIRED ACTION
 ${direction}
+
+Use the prior attempt evidence before editing. The current diff and the failing command output are authoritative. Do not repeat an approach that left the same failure unresolved: identify why it did not work, then take a materially different, evidence-based repair path.
 
 After repairing, run the targeted checks you can run. Do not commit. End with:
 <status>complete|continue|blocked|needs_decision</status>
@@ -1177,6 +1183,7 @@ After repairing, run the targeted checks you can run. Do not commit. End with:
 
 function recoveryPrompt(stage: TripStage, state: RunState, decision: string | undefined): string {
   const open = openBlockingFindings(state.findings, stage.id);
+  const priorAttempts = formatRepairAttemptEvidence(state.stageStates[stage.id]?.attempts ?? []);
   return `Recover and complete an interrupted stage. Partial edits are EXPECTED in the working tree — your own from an earlier attempt, and, in a shared checkout, in-contract changes from prior stages (schema, generated code, fixtures, helpers). Treat all of them as expected and in-contract: inspect them, build on them, and keep them. Do not revert them, do not treat them as foreign or "host-owned", and do not pause or block because they are present. Do not repeat already-completed work blindly.
 
 ${stage.prompt}
@@ -1184,8 +1191,37 @@ ${stage.prompt}
 OPEN BLOCKING FINDINGS
 ${formatOpenFindings(open)}
 
+RECENT ATTEMPT EVIDENCE
+${priorAttempts}
+
 ${decision ? `Previously resolved decision:\n${decision}\n` : ""}
 Stay inside your allowed paths — editing any file that matches them is in-contract. Do not commit. Return the required structured status.`;
+}
+
+function formatRepairAttemptEvidence(attempts: AttemptRecord[]): string {
+  if (!attempts.length) return "No prior attempts were recorded.";
+  const recent = attempts.slice(-4).map((attempt) => {
+    const validation = attempt.validationResults.length
+      ? attempt.validationResults.map((result) => {
+        const status = result.exitCode === 0 && !result.timedOut ? "PASS" : "FAIL";
+        const output = status === "FAIL" ? truncateRepairEvidence(result.stderr || result.stdout, 700) : "";
+        return `${status} ${result.command}${result.timedOut ? " (timed out)" : ""}${output ? `\n${output}` : ""}`;
+      }).join("\n")
+      : "No deterministic validation recorded.";
+    const review = attempt.reviewVerdict;
+    const reviewEvidence = [
+      `Review: ${review.status}; ${truncateRepairEvidence(review.rationale, 400)}`,
+      review.missingItems.length ? `Missing: ${truncateRepairEvidence(review.missingItems.join("; "), 400)}` : "",
+      review.findings.length ? `Findings: ${truncateRepairEvidence(review.findings.map((finding) => `${finding.summary}: ${finding.remediation ?? finding.evidence}`).join("; "), 700)}` : "",
+    ].filter(Boolean).join("\n");
+    return `Attempt ${attempt.attempt} (${attempt.role}, ${attempt.status}, diff ${attempt.diffHash || "none"})\n${validation}\n${reviewEvidence}`;
+  });
+  return truncateRepairEvidence(recent.join("\n\n"), 6_000);
+}
+
+function truncateRepairEvidence(value: string, limit: number): string {
+  const normalized = value.trim();
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit)}\n…[truncated]`;
 }
 
 function reviewPrompt(
