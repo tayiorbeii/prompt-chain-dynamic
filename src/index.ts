@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { compilePlanFile } from "./compiler.ts";
@@ -98,7 +98,7 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
         const runId = args.trim() || await latestRunId(repository);
         if (!runId) return ctx.ui.notify("No Prompt-chain hybrid runs were found in this repository.", "warning");
         const state = await loadRunState(repository, runId);
-        ctx.ui.notify(formatRunSummary(state), "info");
+        await showStatusSummary(ctx, formatRunSummary(state));
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
       }
@@ -353,4 +353,58 @@ async function latestRunId(repository: string): Promise<string | undefined> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function showStatusSummary(
+  ctx: ExtensionCommandContext,
+  summary: string,
+): Promise<void> {
+  const pageSize = 16;
+  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    let page = 0;
+    const renderLines = (width: number): string[] => {
+      const lines = wrapStatusSummary(summary, Math.max(1, width - 4));
+      const pageCount = Math.max(1, Math.ceil(lines.length / pageSize));
+      page = Math.min(page, pageCount - 1);
+      const start = page * pageSize;
+      return [
+        theme.fg("accent", theme.bold("Prompt-chain status")),
+        theme.fg("dim", `Page ${page + 1}/${pageCount} · ↑/↓ or j/k to navigate · enter/esc to close`),
+        "",
+        ...lines.slice(start, start + pageSize),
+      ];
+    };
+    return {
+      render: renderLines,
+      invalidate: () => {},
+      handleInput: (data: string) => {
+        if (data === "\u001b" || data === "\r" || data === "\n") return done();
+        if (data === "\u001b[B" || data === "j" || data === " ") page += 1;
+        else if (data === "\u001b[A" || data === "k") page = Math.max(0, page - 1);
+        else if (data === "\u001b[6~") page += 1;
+        else if (data === "\u001b[5~") page = Math.max(0, page - 1);
+        else return;
+        tui.requestRender();
+      },
+    };
+  }, {
+    overlay: true,
+    overlayOptions: { width: "90%", minWidth: 60, maxHeight: "80%", margin: 1 },
+  });
+}
+
+function wrapStatusSummary(summary: string, width: number): string[] {
+  return summary.split("\n").flatMap((line) => {
+    if (!line) return [""];
+    const wrapped: string[] = [];
+    let remaining = line;
+    while (remaining.length > width) {
+      const breakAt = remaining.lastIndexOf(" ", width);
+      const end = breakAt > 0 ? breakAt : width;
+      wrapped.push(remaining.slice(0, end));
+      remaining = remaining.slice(end).trimStart();
+    }
+    wrapped.push(remaining);
+    return wrapped;
+  });
 }
