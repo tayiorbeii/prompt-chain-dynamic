@@ -33,7 +33,8 @@
     "trip-compile": "./bin/trip-compile.ts",
     "trip-validate": "./bin/trip-validate.ts",
     "trip-headless": "./bin/trip-headless.ts",
-    "trip-loop": "./bin/trip-loop.ts"
+    "trip-loop": "./bin/trip-loop.ts",
+    "trip-reaper": "./bin/trip-reaper.ts"
   },
   "pi": {
     "extensions": [

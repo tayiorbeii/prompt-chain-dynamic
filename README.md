@@ -36,12 +36,14 @@ Humans normally author Markdown. JSON is the frozen machine contract and may als
 - Strict worktree creation owned by this runtime; no fallback to parallel shared-checkout writing.
 - Direct agent commits rejected.
 - Actual Git changes checked against the stage path contract.
-- Required outputs and validation commands checked before review completion.
+- Required outputs and validation commands checked before review completion; known “no tests found” exit-0 output is rejected as a false green.
 - Typed structured output through `WorkflowAgent` and TypeBox.
 - Free-form corrective feedback defaults to `continue`, never completion.
 - Durable blocking finding ledger and same-stage repair loop.
 - Fresh independent reviewer ensemble after each repair.
-- Agent decisions by default; `--human-decisions` pauses after an agent recommendation.
+- Agent decisions by default; `--human-decisions` records the recommendation for later human review without wedging execution.
+- Redundant detached stale-lease reapers with atomic generation claims, so dead workers/reapers are automatically replaced without duplicate resumes.
+- Bounded agent, decision, and heartbeat-shutdown waits; exhausted safe work is accepted best-effort with durable follow-up notes.
 - Verified binary patch capture and SHA-256 hashing.
 - Deterministic fan-in and runtime-owned scoped result commit.
 - Run state, findings, decisions, patches and integration journals under `.pi/prompt-chain-hybrid/runs/`.
@@ -100,6 +102,14 @@ docs/REVIEW-CHECKLIST.md
 /prompt-chain-decide <run-id> <choice> :: <rationale>
 /prompt-chain-abort [run-id]
 ```
+
+`/prompt-chain-status` reports when the status was requested; run creation, start, update, completion, and elapsed times; lease freshness and abort state; plus per-step task, dependency, timing, attempt, validation, blocker, changed-path, worktree, patch, and verified-commit details. A terminally aborted run cannot display a stale running step as active; it is labeled as interrupted.
+
+`/prompt-chain-abort` is durable across Pi processes. Active workers observe the request at the next attempt boundary, while an expired worker lease is aborted immediately. An explicit `/prompt-chain-resume` reopens an aborted run, validates and preserves its in-contract checkout changes, clears the abort request, atomically claims the next lease generation, and continues the interrupted stage. A live lease rejects concurrent resume attempts.
+
+If the branch intentionally moved after a run stopped, checkpoint all source changes first and use `/prompt-chain-resume <run-id> --adopt-current-head`. This explicit recovery mode refuses a dirty source workspace, backs up the pre-adoption run state, records the old and new base revisions, and then continues from the clean current `HEAD`. It never silently rebases an ambiguous dirty workspace.
+
+Normal CLI/Pi runs launch two detached `trip-reaper` replicas. They poll durable lease freshness, wait while the current worker is healthy, and atomically reclaim stale generations. One replica remains outside the recovered worker process, so it can recover if that worker/reaper dies too. Cross-process state locks and generation checks ensure that competing reapers have one winner and stale workers cannot overwrite the recovered run.
 
 Optional issue-loop commands:
 
@@ -205,7 +215,9 @@ agent output
        no: capture durable artifact and checkpoint
 ```
 
-Repair exhaustion pauses as `review_blocked`. It never promotes the latest attempt merely because the loop limit was reached.
+`reviewPolicy.maxRepairRounds` is a focused-strategy window, not a terminal cap. When that window closes, the runtime automatically continues from the current worktree: evolving attempts enter another focused repair window, while stagnant attempts request configured research and otherwise receive a root-cause/re-plan prompt. Worker/check failures and reviewer-only churn have separate consecutive-failure rails. At either rail or the total automatic-attempt limit (`continuationPolicy.autoResumeTurnLimit`, default 30), the runtime ranks durable candidate patches, restores the strongest safe attempt, marks unresolved findings `follow-up-created`, writes per-stage and run-level `follow-ups.md`, and continues downstream work instead of pausing.
+
+The run lease is renewed periodically during long agent and reviewer calls. A detached reaper observes expiry and atomically resumes the interrupted stage. Every backend call has a runtime-owned wall-clock timeout, decision calls have a separate bounded timeout with an autonomous safest-option fallback, and heartbeat shutdown is bounded so a wedged lease write cannot wedge `finally`. Fresh reviews also reconcile the finding ledger so resolved historical findings do not accumulate in later repair prompts. Safety boundaries—out-of-contract writes, workspace drift, direct agent commits, and corrupt patch hashes—still stop rather than silently ship unsafe work.
 
 ## Decision policy
 
@@ -215,13 +227,13 @@ Default:
 needs_decision → decision agent → implementation direction → repair → validation → review
 ```
 
-Human mode:
+Human-review mode:
 
 ```text
-needs_decision → decision agent recommendation → durable pause → human choice → resume
+needs_decision → decision agent recommendation → continue with safest reversible choice → durable follow-up for human review
 ```
 
-A decision supplies direction only. It cannot close the associated implementation finding.
+A decision supplies direction only. It cannot close the associated implementation finding. If decision sessions time out or return malformed output, the runtime records an `auto` decision and continues with the safest reversible in-scope option.
 
 ## Parallel writers
 

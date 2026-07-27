@@ -122,6 +122,46 @@ export function markFindingsResolved(findings: Finding[], stageId: string, evide
   }
 }
 
+/**
+ * Reconcile a fresh review against the prior open findings for a stage.
+ * Review prompts require the fresh reviewer to verify every open finding, so an
+ * omitted finding is resolved rather than carried forever into later prompts.
+ * Exact repeats retain their stable ID and receive the latest evidence.
+ */
+export function reconcileOpenFindings(
+  findings: Finding[],
+  stageId: string,
+  current: Finding[],
+  evidence: Finding["resolutionEvidence"],
+): { additions: Finding[]; updated: Finding[] } {
+  const now = new Date().toISOString();
+  const prior = findings.filter((finding) => finding.stageId === stageId && finding.disposition === "open");
+  const unmatched = [...current];
+  const updated: Finding[] = [];
+
+  for (const finding of prior) {
+    const index = unmatched.findIndex((candidate) => candidate.summary.trim().toLowerCase() === finding.summary.trim().toLowerCase());
+    if (index >= 0) {
+      const latest = unmatched.splice(index, 1)[0]!;
+      finding.attempt = latest.attempt;
+      finding.source = latest.source;
+      finding.severity = latest.severity;
+      finding.blocking = latest.blocking;
+      finding.evidence = latest.evidence;
+      finding.suggestedRemediation = latest.suggestedRemediation;
+      finding.affectedPaths = latest.affectedPaths;
+      finding.updatedAt = now;
+    } else {
+      finding.disposition = "resolved";
+      finding.updatedAt = now;
+      finding.resolutionEvidence = evidence;
+    }
+    updated.push(finding);
+  }
+
+  return { additions: unmatched, updated };
+}
+
 export function openBlockingFindings(findings: Finding[], stageId?: string): Finding[] {
   return findings.filter((finding) => finding.disposition === "open" && finding.blocking && (!stageId || finding.stageId === stageId));
 }

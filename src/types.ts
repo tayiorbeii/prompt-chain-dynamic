@@ -33,6 +33,9 @@ export interface AttemptRecord {
   validationResults: ValidationResult[];
   reviewVerdict: NormalizedReview;
   diffHash: string;
+  /** Durable candidate patch captured at this attempt boundary. */
+  patchPath?: string;
+  patchSha256?: string;
   asi: Record<string, unknown>;
   status: "keep" | "discard" | "crash" | "checks_failed";
   startedAt: string;
@@ -62,6 +65,18 @@ export interface ContinuationPolicy {
   autoResumeTurnLimit?: number;
   consecutiveFailureOverride?: number;
   leaseTimeoutMs?: number;
+  /** Hard wall-clock timeout for each backend agent call. Defaults to sessionTimeoutMs. */
+  agentCallTimeoutMs?: number;
+  /** Hard wall-clock timeout for autonomous decision calls. */
+  decisionTimeoutMs?: number;
+  /** Maximum time shutdown waits for an in-flight lease renewal. */
+  heartbeatStopTimeoutMs?: number;
+  /** Poll interval used by the detached stale-lease reaper. */
+  reaperPollIntervalMs?: number;
+  /** Disable only when an external scheduler provides equivalent stale-lease recovery. */
+  reaperEnabled?: boolean;
+  /** Accept the best safe attempt and create follow-up notes instead of pausing on exhaustion. */
+  bestEffortCompletion?: boolean;
   checkpointVerifiedStages?: boolean;
   onRequiredExhaustion?: "research";
   onOptionalExhaustion?: "checkpoint-and-follow-up";
@@ -303,6 +318,12 @@ export interface StageRunState {
   changedPaths: string[];
   lastAgentOutput?: string;
   validationResults: ValidationResult[];
+  /** How this stage crossed its durable completion boundary. */
+  completionMode?: "verified" | "best-effort";
+  /** Best attempt according to deterministic validation and review evidence. */
+  bestAttempt?: number;
+  /** Durable Markdown note containing work deferred after best-effort completion. */
+  followUpArtifact?: string;
 }
 
 export interface RunState {

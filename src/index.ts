@@ -10,6 +10,7 @@ import { recordHumanDecision, requestAbort, resumeRun, runManifestFile } from ".
 import { Supervisor } from "./supervisor.ts";
 import { auditCompletion } from "./audit.ts";
 import { loadRunState } from "./store.ts";
+import { formatRunSummary } from "./status.ts";
 import { validateManifest } from "./validation.ts";
 import type { TripManifest } from "./types.ts";
 
@@ -105,17 +106,30 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("prompt-chain-resume", {
-    description: "Resume a paused or interrupted Prompt-chain hybrid run",
+    description: "Resume a paused, interrupted, failed, or explicitly aborted Prompt-chain hybrid run",
     handler: async (args, ctx) => {
       try {
         const repository = await repositoryRoot(ctx.cwd);
-        const runId = args.trim() || await latestRunId(repository);
-        if (!runId) return ctx.ui.notify("Usage: /prompt-chain-resume <run-id>", "warning");
+        const tokens = shellWords(args);
+        const adoptCurrentHead = removeFlag(tokens, "--adopt-current-head");
+        const runId = tokens[0] || await latestRunId(repository);
+        if (!runId || tokens.length > 1) return ctx.ui.notify("Usage: /prompt-chain-resume <run-id> [--adopt-current-head]", "warning");
+        const requestedAt = new Date();
+        ctx.ui.setStatus("prompt-chain-hybrid", `Resuming ${runId}…`);
+        ctx.ui.notify(
+          `Resume requested: ${requestedAt.toISOString()}\nRun: ${runId}\nProgress will appear here at each durable run or step transition. Long implementation and review attempts can take several minutes between updates.`,
+          "info",
+        );
         const state = await resumeRun({
           repositoryRoot: repository,
           runId,
-          onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
+          adoptCurrentHead,
+          onEvent: ({ message, stageId }) => {
+            ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100));
+            ctx.ui.notify(`[${new Date().toISOString()}] ${message}${stageId ? `\nStep: ${stageId}` : ""}`, "info");
+          },
         });
+        ctx.ui.setStatus("prompt-chain-hybrid", `${state.id}: ${state.status}`);
         ctx.ui.notify(formatRunSummary(state), state.status === "completed" ? "info" : "warning");
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
@@ -146,8 +160,11 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
         const repository = await repositoryRoot(ctx.cwd);
         const runId = args.trim() || await latestRunId(repository);
         if (!runId) return ctx.ui.notify("Usage: /prompt-chain-abort <run-id>", "warning");
-        await requestAbort(repository, runId);
-        ctx.ui.notify(`Abort requested for ${runId}. It will be observed at the next durable boundary.`, "warning");
+        const state = await requestAbort(repository, runId);
+        const detail = state.status === "aborted"
+          ? "The run is now durably aborted and can be explicitly reopened with /prompt-chain-resume."
+          : "It will be observed at the next durable boundary.";
+        ctx.ui.notify(`Abort requested for ${runId}. ${detail}`, "warning");
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
       }
@@ -332,15 +349,6 @@ async function latestRunId(repository: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
-}
-
-function formatRunSummary(state: Awaited<ReturnType<typeof loadRunState>>): string {
-  const stages = state.manifest.stages.map((stage) => {
-    const value = state.stageStates[stage.id];
-    return `${value?.status === "completed" ? "✓" : value?.status === "running" ? "▶" : value?.status === "paused" ? "!" : value?.status === "failed" ? "×" : "·"} ${stage.id}: ${value?.status ?? "unknown"}`;
-  }).join("\n");
-  const open = state.findings.filter((finding) => finding.blocking && finding.disposition === "open").length;
-  return `Run: ${state.id}\nStatus: ${state.status}\nDecision mode: ${state.decisionMode}\nOpen blockers: ${open}\nResult commit: ${state.resultCommit ?? "none"}${state.pauseReason ? `\nPause reason: ${state.pauseReason}` : ""}\n\n${stages}`;
 }
 
 function errorMessage(error: unknown): string {

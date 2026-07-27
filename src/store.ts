@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Finding, RunState } from "./types.ts";
 
@@ -20,21 +20,149 @@ export async function initializeRunStorage(repositoryRoot: string, runId: string
   return root;
 }
 
-const writeQueues = new Map<string, Promise<void>>();
+export class LeaseGenerationMismatchError extends Error {
+  constructor(runId: string, expected: number, actual: number) {
+    super(`run ${runId} lease generation ${expected} was superseded by generation ${actual}`);
+    this.name = "LeaseGenerationMismatchError";
+  }
+}
 
-export async function writeRunState(repositoryRoot: string, state: RunState): Promise<void> {
-  const file = runStatePath(repositoryRoot, state.id);
+export interface LeaseClaimResult {
+  claimed: boolean;
+  state: RunState;
+  reason: "claimed" | "completed" | "aborted" | "live" | "generation-mismatch";
+  previousStatus: RunState["status"];
+}
+
+const writeQueues = new Map<string, Promise<unknown>>();
+const LOCK_WAIT_TIMEOUT_MS = 15_000;
+const STALE_LOCK_MS = 30_000;
+
+/**
+ * Serialize a state operation both within this process and across detached
+ * reaper/worker processes. The directory create is the cross-process CAS.
+ */
+async function withStateLock<T>(file: string, operation: () => Promise<T>): Promise<T> {
   const previous = writeQueues.get(file) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(async () => {
-    state.updatedAt = new Date().toISOString();
-    await atomicWriteJson(file, state);
+    const release = await acquireFileLock(`${file}.lock`);
+    try {
+      return await operation();
+    } finally {
+      await release();
+    }
   });
   writeQueues.set(file, next);
   try {
-    await next;
+    return await next;
   } finally {
     if (writeQueues.get(file) === next) writeQueues.delete(file);
   }
+}
+
+async function acquireFileLock(lockDirectory: string): Promise<() => Promise<void>> {
+  const startedAt = Date.now();
+  await mkdir(path.dirname(lockDirectory), { recursive: true });
+  while (true) {
+    try {
+      await mkdir(lockDirectory);
+      await writeFile(path.join(lockDirectory, "owner.json"), `${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })}\n`);
+      return async () => {
+        await rm(lockDirectory, { recursive: true, force: true });
+      };
+    } catch (error) {
+      if (!isCode(error, "EEXIST")) throw error;
+      try {
+        const info = await stat(lockDirectory);
+        if (Date.now() - info.mtimeMs > STALE_LOCK_MS) {
+          await rm(lockDirectory, { recursive: true, force: true });
+          continue;
+        }
+      } catch (statError) {
+        if (!isCode(statError, "ENOENT")) throw statError;
+        continue;
+      }
+      if (Date.now() - startedAt >= LOCK_WAIT_TIMEOUT_MS) {
+        throw new Error(`timed out waiting for durable run-state lock ${lockDirectory}`);
+      }
+      await sleep(25);
+    }
+  }
+}
+
+export async function writeRunState(repositoryRoot: string, state: RunState): Promise<void> {
+  const file = runStatePath(repositoryRoot, state.id);
+  await withStateLock(file, async () => {
+    const durable = await readOptionalRunState(file);
+    const incomingGeneration = state.lease?.generation;
+    const durableGeneration = durable?.lease?.generation;
+    if (incomingGeneration !== undefined && durableGeneration !== undefined && incomingGeneration < durableGeneration) {
+      throw new LeaseGenerationMismatchError(state.id, incomingGeneration, durableGeneration);
+    }
+    const now = new Date().toISOString();
+    state.updatedAt = now;
+    if (state.status === "running" && state.lease) state.lease.heartbeatAt = now;
+    await atomicWriteJson(file, state);
+  });
+}
+
+/** Renew only the durable lease. The generation check prevents an old worker
+ * from overwriting a run after a newer resume has reclaimed it. */
+export async function heartbeatRunLease(repositoryRoot: string, runId: string, generation: number): Promise<boolean> {
+  const file = runStatePath(repositoryRoot, runId);
+  return await withStateLock(file, async () => {
+    const state = await loadRunState(repositoryRoot, runId);
+    if (!state.lease || state.lease.generation !== generation || state.status !== "running") return false;
+    const now = new Date().toISOString();
+    state.lease.heartbeatAt = now;
+    state.updatedAt = now;
+    await atomicWriteJson(file, state);
+    return true;
+  });
+}
+
+/**
+ * Atomically claim a stale/non-running run. Only one competing supervisor can
+ * advance the generation, so duplicate reapers cannot start duplicate workers.
+ */
+export async function claimRunLease(
+  repositoryRoot: string,
+  runId: string,
+  options: { expectedGeneration?: number; reopenAborted?: boolean; now?: number } = {},
+): Promise<LeaseClaimResult> {
+  const file = runStatePath(repositoryRoot, runId);
+  return await withStateLock(file, async () => {
+    const state = await loadRunState(repositoryRoot, runId);
+    const previousStatus = state.status;
+    if (state.status === "completed") return { claimed: false, state, reason: "completed", previousStatus };
+    if (state.status === "aborted" && !options.reopenAborted) return { claimed: false, state, reason: "aborted", previousStatus };
+    if (options.expectedGeneration !== undefined && state.lease?.generation !== options.expectedGeneration) {
+      return { claimed: false, state, reason: "generation-mismatch", previousStatus };
+    }
+    if (state.status === "running" && leaseIsFresh(state, options.now)) {
+      return { claimed: false, state, reason: "live", previousStatus };
+    }
+
+    const now = new Date(options.now ?? Date.now()).toISOString();
+    state.lease ??= { owner: runId, generation: 0, heartbeatAt: now, leaseTimeoutMs: 120_000 };
+    state.lease.owner = `${runId}:${process.pid}`;
+    state.lease.generation += 1;
+    state.lease.heartbeatAt = now;
+    state.status = "running";
+    state.abortRequested = false;
+    state.completedAt = undefined;
+    state.pauseKind = undefined;
+    state.pauseReason = undefined;
+    state.updatedAt = now;
+    await atomicWriteJson(file, state);
+    return { claimed: true, state, reason: "claimed", previousStatus };
+  });
+}
+
+export function leaseIsFresh(state: RunState, now = Date.now()): boolean {
+  if (!state.lease) return false;
+  const heartbeat = Date.parse(state.lease.heartbeatAt);
+  return Number.isFinite(heartbeat) && now - heartbeat <= state.lease.leaseTimeoutMs;
 }
 
 export async function loadRunState(repositoryRoot: string, runId: string): Promise<RunState> {
@@ -87,4 +215,21 @@ export async function atomicWriteJson(file: string, value: unknown): Promise<voi
   const temporary = `${file}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await rename(temporary, file);
+}
+
+async function readOptionalRunState(file: string): Promise<RunState | undefined> {
+  try {
+    return JSON.parse(await readFile(file, "utf8")) as RunState;
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+}
+
+function isCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

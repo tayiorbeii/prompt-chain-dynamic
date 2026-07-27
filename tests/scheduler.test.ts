@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -36,7 +36,7 @@ class FailFirstBackend implements AgentBackend {
   }
 }
 
-test("blockedBy is populated on stages whose dependencies are failed", async () => {
+test("a failed optional worker is completed best-effort so downstream work still runs", async () => {
   const repository = await createRepository();
   const manifest: TripManifest = {
     schemaVersion: 1,
@@ -84,20 +84,15 @@ test("blockedBy is populated on stages whose dependencies are failed", async () 
   await writeFile(manifestPath, JSON.stringify(manifest));
   const state = await runManifestFile({ manifestPath, backend: new FailFirstBackend() });
 
-  // slice-a failed (non-required, so run continues)
-  assert.equal(state.stageStates["slice-a"]?.status, "failed");
-
-  // slice-b is downstream of slice-a — should be skipped with schedulingReason
-  assert.equal(state.stageStates["slice-b"]?.status, "skipped");
-  assert.deepEqual(state.stageStates["slice-b"]?.blockedBy, ["slice-a"]);
-  assert.equal(state.stageStates["slice-b"]?.schedulingReason?.kind, "waiting_on_failed_dependency");
-
-  // integrate depends on slice-b (skipped) — should also be skipped
-  assert.equal(state.stageStates["integrate"]?.status, "skipped");
-  assert.deepEqual(state.stageStates["integrate"]?.blockedBy, ["slice-b"]);
+  assert.equal(state.status, "completed");
+  assert.equal(state.stageStates["slice-a"]?.status, "completed");
+  assert.equal(state.stageStates["slice-a"]?.completionMode, "best-effort");
+  assert.ok(state.stageStates["slice-a"]?.followUpArtifact);
+  assert.equal(state.stageStates["slice-b"]?.status, "completed");
+  assert.equal(state.stageStates["integrate"]?.status, "completed");
 });
 
-test("downstream stages of a failed dependency show skipped status with schedulingReason set", async () => {
+test("persistent worker failure is noted and does not skip downstream stages", async () => {
   const repository = await createRepository();
   const manifest: TripManifest = {
     schemaVersion: 1,
@@ -152,14 +147,11 @@ test("downstream stages of a failed dependency show skipped status with scheduli
   }
 
   const state = await runManifestFile({ manifestPath, backend: new TargetedFailBackend() });
-  assert.equal(state.stageStates["failed-stage"]?.status, "failed");
-  assert.equal(state.stageStates["downstream"]?.status, "skipped");
-  const sr = state.stageStates["downstream"]?.schedulingReason;
-  assert.ok(sr, "schedulingReason should be set");
-  assert.equal(sr?.kind, "waiting_on_failed_dependency");
-  if (sr?.kind === "waiting_on_failed_dependency") {
-    assert.equal(sr.dependencyId, "failed-stage");
-  }
+  assert.equal(state.status, "completed");
+  assert.equal(state.stageStates["failed-stage"]?.status, "completed");
+  assert.equal(state.stageStates["failed-stage"]?.completionMode, "best-effort");
+  assert.equal(state.stageStates["downstream"]?.status, "completed");
+  assert.equal(state.stageStates["integrate"]?.status, "completed");
 });
 
 test("run lease is initialized on runManifestFile", async () => {
@@ -205,16 +197,16 @@ test("resumeRun with a stale generation returns current state without side effec
   const initial = await runManifestFile({ manifestPath, backend: new SimpleBackend() });
   const { resumeRun } = await import("../src/runner.ts");
   // Pass a stale generation (0 != 1)
-  const returned = await resumeRun({ repositoryRoot: repository, runId: initial.id, leaseGeneration: 0, backend: new SimpleBackend() });
+  const returned = await resumeRun({ repositoryRoot: repository, runId: initial.id, leaseGeneration: 0, backend: new SimpleBackend(), externalReaper: false });
   // Should return current state with no side effects — generation should still be 1
   assert.equal(returned.lease?.generation, initial.lease?.generation, "stale generation should not bump the lease");
   assert.equal(returned.status, initial.status, "stale generation should not change run status");
 });
 
-test("consecutive non-progress limit pauses the stage after maxConsecutiveFailures non-completing rounds", async () => {
+test("consecutive non-progress accepts best effort and records follow-up after the configured rail", async () => {
   // A backend that always returns "continue" — every attempt is a discard.
-  // With maxConsecutiveFailures: 3, the stage should pause after 3 consecutive
-  // non-completing rounds rather than exhausting all repair rounds.
+  // With maxConsecutiveFailures: 3, the stage crosses a best-effort boundary
+  // instead of pausing or exhausting all repair rounds.
   const repository = await createRepository();
   const manifest: TripManifest = {
     schemaVersion: 1,
@@ -263,9 +255,10 @@ test("consecutive non-progress limit pauses the stage after maxConsecutiveFailur
     }
   }
   const state = await runManifestFile({ manifestPath, backend: new AlwaysContinueBackend() });
-  assert.equal(state.status, "paused", `expected paused, got ${state.status}: ${state.pauseReason}`);
-  assert.equal(state.pauseKind, "review_blocked");
-  // Should have paused after 3 consecutive non-completing rounds, not 10
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(state.stageStates.impl?.completionMode, "best-effort");
+  assert.ok(state.stageStates.impl?.followUpArtifact);
+  assert.ok(state.findings.some((finding) => finding.stageId === "impl" && finding.disposition === "follow-up-created"));
   assert.ok(implementationAttempts <= 4, `expected at most 4 attempts (1 impl + 3 repairs), got ${implementationAttempts}`);
 });
 
@@ -293,6 +286,176 @@ test("resumeRun with current generation increments the lease generation", async 
   await writeRunState(repository, initial);
   const { resumeRun } = await import("../src/runner.ts");
   const gen = initial.lease?.generation ?? 1;
-  const resumed = await resumeRun({ repositoryRoot: repository, runId: initial.id, leaseGeneration: gen, backend: new SimpleBackend() });
+  const resumed = await resumeRun({ repositoryRoot: repository, runId: initial.id, leaseGeneration: gen, backend: new SimpleBackend(), externalReaper: false });
   assert.equal(resumed.lease?.generation, gen + 1, "current generation should be incremented on successful resume");
+});
+
+test("an explicit resume reopens an aborted run and clears its abort request", async () => {
+  const { writeRunState } = await import("../src/store.ts");
+  const { resumeRun } = await import("../src/runner.ts");
+  const repository = await createRepository();
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Reopen aborted",
+    workingDirectory: repository,
+    settings: { autoCommit: false, reviewPolicy: { required: false } },
+    stages: [{ id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" }],
+  };
+  const manifestPath = path.join(os.tmpdir(), `reopen-aborted-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  class SimpleBackend implements AgentBackend {
+    async run(): Promise<AgentResult> { return result("done"); }
+  }
+  const initial = await runManifestFile({ manifestPath, backend: new SimpleBackend() });
+  initial.status = "aborted";
+  initial.abortRequested = true;
+  initial.completedAt = new Date().toISOString();
+  initial.stageStates.research!.status = "paused";
+  initial.stageStates.research!.completedAt = undefined;
+  await writeRunState(repository, initial);
+
+  const generation = initial.lease?.generation ?? 1;
+  const resumed = await resumeRun({ repositoryRoot: repository, runId: initial.id, backend: new SimpleBackend(), externalReaper: false });
+  assert.equal(resumed.status, "completed");
+  assert.equal(resumed.abortRequested, false);
+  assert.equal(resumed.stageStates.research?.status, "completed");
+  assert.equal(resumed.lease?.generation, generation + 1);
+});
+
+test("explicit HEAD adoption resumes from a clean intentional branch move and preserves a recovery backup", async () => {
+  const { writeRunState, runRoot } = await import("../src/store.ts");
+  const { resumeRun } = await import("../src/runner.ts");
+  const repository = await createRepository();
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Adopt moved HEAD",
+    workingDirectory: repository,
+    settings: { autoCommit: false, reviewPolicy: { required: false } },
+    stages: [{ id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" }],
+  };
+  const manifestPath = path.join(os.tmpdir(), `adopt-head-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  class SimpleBackend implements AgentBackend {
+    async run(): Promise<AgentResult> { return result("done"); }
+  }
+  const initial = await runManifestFile({ manifestPath, backend: new SimpleBackend(), externalReaper: false });
+  initial.status = "paused";
+  initial.pauseKind = "workspace_drift";
+  initial.stageStates.research!.status = "paused";
+  initial.stageStates.research!.completedAt = undefined;
+  await writeRunState(repository, initial);
+  await writeFile(path.join(repository, "README.md"), "intentional new base\n");
+  await git(repository, ["add", "README.md"]);
+  await git(repository, ["commit", "-m", "intentional branch move"]);
+  const adoptedHead = await git(repository, ["rev-parse", "HEAD"]);
+
+  const resumed = await resumeRun({
+    repositoryRoot: repository,
+    runId: initial.id,
+    backend: new SimpleBackend(),
+    externalReaper: false,
+    adoptCurrentHead: true,
+  });
+  assert.equal(resumed.status, "completed", resumed.pauseReason);
+  assert.equal(resumed.baseRevision, adoptedHead);
+  const backups = await readdir(path.join(runRoot(repository, initial.id), "recovery"));
+  assert.ok(backups.some((name) => name.startsWith("pre-head-adoption-")));
+});
+
+test("explicit HEAD adoption refuses uncommitted source changes", async () => {
+  const { writeRunState } = await import("../src/store.ts");
+  const { resumeRun } = await import("../src/runner.ts");
+  const repository = await createRepository();
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Reject dirty adoption",
+    workingDirectory: repository,
+    settings: { autoCommit: false, reviewPolicy: { required: false } },
+    stages: [{ id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" }],
+  };
+  const manifestPath = path.join(os.tmpdir(), `reject-dirty-adopt-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  class SimpleBackend implements AgentBackend {
+    async run(): Promise<AgentResult> { return result("done"); }
+  }
+  const initial = await runManifestFile({ manifestPath, backend: new SimpleBackend(), externalReaper: false });
+  initial.status = "paused";
+  initial.stageStates.research!.status = "paused";
+  await writeRunState(repository, initial);
+  await writeFile(path.join(repository, "README.md"), "intentional new base\n");
+  await git(repository, ["add", "README.md"]);
+  await git(repository, ["commit", "-m", "intentional branch move"]);
+  await mkdir(path.join(repository, "src"), { recursive: true });
+  await writeFile(path.join(repository, "src", "dirty.ts"), "export const dirty = true;\n");
+
+  const resumed = await resumeRun({
+    repositoryRoot: repository,
+    runId: initial.id,
+    backend: new SimpleBackend(),
+    externalReaper: false,
+    adoptCurrentHead: true,
+  });
+  assert.equal(resumed.status, "failed");
+  assert.equal(resumed.pauseKind, "workspace_drift");
+  assert.match(resumed.pauseReason ?? "", /requires source changes to be committed or stashed/i);
+  assert.equal(resumed.baseRevision, initial.baseRevision);
+});
+
+test("resume refuses a concurrent worker while the run lease is live", async () => {
+  const { writeRunState } = await import("../src/store.ts");
+  const { resumeRun } = await import("../src/runner.ts");
+  const repository = await createRepository();
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Live lease",
+    workingDirectory: repository,
+    settings: { autoCommit: false, reviewPolicy: { required: false } },
+    stages: [{ id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" }],
+  };
+  const manifestPath = path.join(os.tmpdir(), `live-lease-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  class SimpleBackend implements AgentBackend {
+    async run(): Promise<AgentResult> { return result("done"); }
+  }
+  const initial = await runManifestFile({ manifestPath, backend: new SimpleBackend() });
+  initial.status = "running";
+  initial.completedAt = undefined;
+  initial.stageStates.research!.status = "running";
+  await writeRunState(repository, initial);
+
+  await assert.rejects(
+    resumeRun({ repositoryRoot: repository, runId: initial.id, backend: new SimpleBackend(), externalReaper: false }),
+    /already running with a live lease/,
+  );
+});
+
+test("abort immediately finalizes a running state whose worker lease expired", async () => {
+  const { requestAbort } = await import("../src/runner.ts");
+  const { writeRunState } = await import("../src/store.ts");
+  const repository = await createRepository();
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Abort stale worker",
+    workingDirectory: repository,
+    settings: { autoCommit: false, reviewPolicy: { required: false } },
+    stages: [{ id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" }],
+  };
+  const manifestPath = path.join(os.tmpdir(), `abort-stale-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  class SimpleBackend implements AgentBackend {
+    async run(): Promise<AgentResult> { return result("done"); }
+  }
+  const initial = await runManifestFile({ manifestPath, backend: new SimpleBackend() });
+  initial.status = "running";
+  initial.completedAt = undefined;
+  initial.stageStates.research!.status = "running";
+  initial.lease!.leaseTimeoutMs = 1;
+  await writeRunState(repository, initial);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const aborted = await requestAbort(repository, initial.id);
+  assert.equal(aborted.status, "aborted");
+  assert.equal(aborted.abortRequested, true);
+  assert.equal(aborted.stageStates.research?.status, "paused");
+  assert.match(aborted.pauseReason ?? "", /worker lease had expired/);
 });

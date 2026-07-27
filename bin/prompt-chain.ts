@@ -43,7 +43,12 @@ if (command === "compile" || command === "plan") {
   const runId = firstPositional(args);
   if (!runId) usage();
   const repository = await repositoryRoot(process.cwd());
-  const state = await resumeRun({ repositoryRoot: repository, runId, onEvent: ({ type, message }) => { process.stderr.write(`[${type}] ${message}\n`); } });
+  const state = await resumeRun({
+    repositoryRoot: repository,
+    runId,
+    adoptCurrentHead: args.includes("--adopt-current-head"),
+    onEvent: ({ type, message }) => { process.stderr.write(`[${type}] ${message}\n`); },
+  });
   process.stdout.write(`${describeRun(state)}\n`);
   if (state.status !== "completed") process.exitCode = 2;
 } else if (command === "status") {
@@ -72,6 +77,6 @@ function valueAfter(values: string[], flag: string): string | undefined {
   return index >= 0 ? values[index + 1] : undefined;
 }
 function usage(): never {
-  process.stderr.write(`prompt-chain commands:\n  prompt-chain compile <plan.md> [--out manifest.json] [--mode auto|serial|parallel] [--working-directory <dir>] [--path-policy permissive|strict]\n  prompt-chain inspect <manifest.json>\n  prompt-chain validate <manifest.json>\n  prompt-chain run <manifest.json> [--human-decisions]\n  prompt-chain status <run-id>\n  prompt-chain resume <run-id>\n  prompt-chain decide <run-id> <choice> [rationale]\n  prompt-chain abort <run-id>\n`);
+  process.stderr.write(`prompt-chain commands:\n  prompt-chain compile <plan.md> [--out manifest.json] [--mode auto|serial|parallel] [--working-directory <dir>] [--path-policy permissive|strict]\n  prompt-chain inspect <manifest.json>\n  prompt-chain validate <manifest.json>\n  prompt-chain run <manifest.json> [--human-decisions]\n  prompt-chain status <run-id>\n  prompt-chain resume <run-id> [--adopt-current-head]\n  prompt-chain decide <run-id> <choice> [rationale]\n  prompt-chain abort <run-id>\n`);
   process.exit(64);
 }

@@ -21,7 +21,12 @@ if (command === "run") {
   const runId = args[0];
   if (!runId) usage();
   const repository = await repositoryRoot(process.cwd());
-  const state = await resumeRun({ repositoryRoot: repository, runId, onEvent: ({ type, message }) => { process.stderr.write(`[${type}] ${message}\n`); } });
+  const state = await resumeRun({
+    repositoryRoot: repository,
+    runId,
+    adoptCurrentHead: args.includes("--adopt-current-head"),
+    onEvent: ({ type, message }) => { process.stderr.write(`[${type}] ${message}\n`); },
+  });
   process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
   if (state.status !== "completed") process.exitCode = 2;
 } else if (command === "status") {
@@ -45,6 +50,6 @@ if (command === "run") {
 }
 
 function usage(): never {
-  process.stderr.write(`usage:\n  trip-headless run <manifest.json> [--human-decisions]\n  trip-headless resume <run-id>\n  trip-headless status <run-id>\n  trip-headless decide <run-id> <choice> [rationale]\n  trip-headless abort <run-id>\n`);
+  process.stderr.write(`usage:\n  trip-headless run <manifest.json> [--human-decisions]\n  trip-headless resume <run-id> [--adopt-current-head]\n  trip-headless status <run-id>\n  trip-headless decide <run-id> <choice> [rationale]\n  trip-headless abort <run-id>\n`);
   process.exit(64);
 }

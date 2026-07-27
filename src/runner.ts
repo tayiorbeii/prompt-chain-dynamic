@@ -28,16 +28,23 @@ import {
   markFindingsResolved,
   normalizeReview,
   openBlockingFindings,
+  reconcileOpenFindings,
   synthesizeReviews,
 } from "./review.ts";
 import { buildDecisionPrompt, decisionRequestFromReview, parseDecision } from "./decision.ts";
 import { hashContract } from "./contract.ts";
-import { isStagnant } from "./stagnation.ts";
+import { isBetter, isStagnant } from "./stagnation.ts";
 import { spawnResearchHook } from "./research-hook.ts";
+import { waitForHeartbeatStop, withTimeout } from "./liveness.ts";
+import { spawnRunReapers } from "./reaper-launcher.ts";
 import {
   appendRunEvent,
   atomicWriteJson,
+  claimRunLease,
+  heartbeatRunLease,
   initializeRunStorage,
+  LeaseGenerationMismatchError,
+  leaseIsFresh,
   loadRunState,
   persistFinding,
   runRoot,
@@ -49,6 +56,7 @@ import { DynamicWorkflowBackend } from "./dynamic-backend.ts";
 import type {
   AgentBackend,
   AgentRequest,
+  AgentResult,
   AttemptRecord,
   DecisionRecord,
   DecisionRequest,
@@ -65,6 +73,8 @@ export interface RunOptions {
   manifestPath: string;
   humanDecisions?: boolean;
   backend?: AgentBackend;
+  /** Disable when a separate service already provides stale-lease recovery. */
+  externalReaper?: boolean;
   onEvent?: (event: { type: string; message: string; stageId?: string }) => void | Promise<void>;
 }
 
@@ -75,6 +85,10 @@ export interface ResumeOptions {
    * A stale token returns the current state without side effects. */
   leaseGeneration?: number;
   backend?: AgentBackend;
+  /** Disable only inside an already-running detached reaper or test harness. */
+  externalReaper?: boolean;
+  /** Explicitly adopt the current clean HEAD as a new recovery base after intentional branch movement. */
+  adoptCurrentHead?: boolean;
   onEvent?: RunOptions["onEvent"];
 }
 
@@ -102,6 +116,17 @@ class PauseRun extends Error {
   }
 }
 
+class AbortRun extends Error {
+  stageId?: string;
+
+  constructor(message: string, stageId?: string) {
+    super(message);
+    this.stageId = stageId;
+  }
+}
+
+class LeaseSuperseded extends Error {}
+
 export async function runManifestFile(options: RunOptions): Promise<RunState> {
   const manifestPath = path.resolve(options.manifestPath);
   const manifest = assertValidManifest(JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest);
@@ -122,7 +147,9 @@ export async function runManifestFile(options: RunOptions): Promise<RunState> {
     id,
     manifestPath,
     manifest,
-    status: "pending",
+    // Persist as running before the detached reaper starts so it cannot race the
+    // initial worker for a merely-pending run.
+    status: "running",
     baseRevision,
     decisionMode: options.humanDecisions ? "human" : manifest.settings?.decisionPolicy?.mode ?? "agent",
     createdAt: now,
@@ -136,13 +163,19 @@ export async function runManifestFile(options: RunOptions): Promise<RunState> {
       owner: id,
       generation: 1,
       heartbeatAt: now,
-      // 120 s — long enough for a slow stage turn, short enough to detect dead runs
-      leaseTimeoutMs: 120_000,
+      // Renewed periodically while an agent or reviewer is running.
+      leaseTimeoutMs: manifest.settings?.continuationPolicy?.leaseTimeoutMs ?? 120_000,
     },
   };
   await initializeRunStorage(repository, id);
   await atomicWriteJson(path.join(runRoot(repository, id), "manifest.json"), manifest);
   await writeRunState(repository, state);
+  if (options.externalReaper !== false
+    && !options.backend
+    && manifest.settings?.continuationPolicy?.reaperEnabled !== false) {
+    const reaperPids = spawnRunReapers(repository, id);
+    await appendRunEvent(repository, id, { type: "reaper.started", pids: reaperPids });
+  }
   return await execute({
     repositoryRoot: repository,
     workingDirectory: manifest.workingDirectory,
@@ -157,24 +190,49 @@ export async function runManifestFile(options: RunOptions): Promise<RunState> {
 
 export async function resumeRun(options: ResumeOptions): Promise<RunState> {
   const repository = path.resolve(options.repositoryRoot);
-  const state = await loadRunState(repository, options.runId);
+  const observed = await loadRunState(repository, options.runId);
+  if (observed.status === "completed") return observed;
+
+  // Cross-process compare-and-swap: only one manual resume, supervisor, or
+  // detached reaper can advance a stale lease generation.
+  const claim = await claimRunLease(repository, options.runId, {
+    expectedGeneration: options.leaseGeneration,
+    reopenAborted: true,
+  });
+  if (!claim.claimed) {
+    if (claim.reason === "live") {
+      throw new Error(`run ${claim.state.id} is already running with a live lease; refusing a concurrent resume`);
+    }
+    return claim.state;
+  }
+
+  const state = claim.state;
+  if (options.externalReaper !== false && state.manifest.settings?.continuationPolicy?.reaperEnabled !== false) {
+    const reaperPids = spawnRunReapers(repository, state.id);
+    await appendRunEvent(repository, state.id, { type: "run.reaper.launched", pids: reaperPids, source: "resume" });
+  }
   const manifest = assertValidManifest(state.manifest);
-  if (state.status === "completed" || state.status === "aborted") return state;
-  // Stale generation check: a caller with an outdated lease token gets the current
-  // state back without any side effects (verbatim from pi-codex-goal pattern).
-  if (options.leaseGeneration !== undefined && state.lease && state.lease.generation !== options.leaseGeneration) {
+  try {
+    await reconcileInterruptedStages(repository, state, claim.previousStatus === "failed", options.adoptCurrentHead === true);
+  } catch (error) {
+    if (!isSafetyBoundaryError(error)) throw error;
+    state.status = "failed";
+    state.pauseKind = "workspace_drift";
+    state.pauseReason = errorMessage(error);
+    state.completedAt = new Date().toISOString();
+    await writeRunState(repository, state);
+    await appendRunEvent(repository, state.id, { type: "run.failed", message: state.pauseReason });
     return state;
   }
-  // Bump lease generation on successful resumption
-  if (state.lease) {
-    state.lease.generation += 1;
-    state.lease.heartbeatAt = new Date().toISOString();
-  }
-  await reconcileInterruptedStages(repository, state);
-  state.status = "pending";
+  state.status = "running";
+  state.abortRequested = false;
+  state.completedAt = undefined;
   state.pauseKind = undefined;
   state.pauseReason = undefined;
   await writeRunState(repository, state);
+  if (claim.previousStatus === "aborted") {
+    await appendRunEvent(repository, state.id, { type: "run.reopened", message: `Aborted run ${state.id} explicitly reopened for resume` });
+  }
   return await execute({
     repositoryRoot: repository,
     workingDirectory: manifest.workingDirectory,
@@ -190,9 +248,17 @@ export async function resumeRun(options: ResumeOptions): Promise<RunState> {
 export async function requestAbort(repositoryRootInput: string, runId: string): Promise<RunState> {
   const repository = path.resolve(repositoryRootInput);
   const state = await loadRunState(repository, runId);
+  if (state.status === "completed" || state.status === "aborted") return state;
   state.abortRequested = true;
-  await writeRunState(repository, state);
   await appendRunEvent(repository, runId, { type: "run.abort.requested" });
+  if (state.status !== "running" || !leaseIsFresh(state)) {
+    const reason = state.status === "running"
+      ? "Abort finalized immediately because the worker lease had expired."
+      : `Abort finalized immediately because the run was ${state.status}.`;
+    finalizeAbortedState(state, reason);
+    await appendRunEvent(repository, runId, { type: "run.aborted", message: state.pauseReason });
+  }
+  await writeRunState(repository, state);
   return state;
 }
 
@@ -234,6 +300,15 @@ export async function recordHumanDecision(
 }
 
 async function execute(context: RunnerContext): Promise<RunState> {
+  const stopHeartbeat = startLeaseHeartbeat(context);
+  try {
+    return await executeLoop(context);
+  } finally {
+    await stopHeartbeat();
+  }
+}
+
+async function executeLoop(context: RunnerContext): Promise<RunState> {
   const { state } = context;
   state.status = "running";
   state.startedAt ??= new Date().toISOString();
@@ -242,13 +317,8 @@ async function execute(context: RunnerContext): Promise<RunState> {
 
   try {
     while (true) {
-      if (state.abortRequested) {
-        state.status = "aborted";
-        state.completedAt = new Date().toISOString();
-        await emit(context, "run.aborted", `Run ${state.id} aborted at a durable boundary`);
-        await writeRunState(context.repositoryRoot, state);
-        return state;
-      }
+      await refreshRunControl(context);
+      if (state.abortRequested) throw new AbortRun(`Run ${state.id} aborted at a durable boundary`);
       const pending = context.manifest.stages.filter((stage) => state.stageStates[stage.id]?.status === "pending");
       if (!pending.length) {
         const failedRequired = context.manifest.stages.find((stage) => stage.required !== false && state.stageStates[stage.id]?.status === "failed");
@@ -256,6 +326,7 @@ async function execute(context: RunnerContext): Promise<RunState> {
         else if (Object.values(state.stageStates).some((entry) => entry.status === "paused")) state.status = "paused";
         else state.status = "completed";
         state.completedAt = new Date().toISOString();
+        if (state.status === "completed") await writeRunFollowUpSummary(context);
         await emit(context, `run.${state.status}`, `Run ${state.id} ${state.status}`);
         await writeRunState(context.repositoryRoot, state);
         return state;
@@ -309,6 +380,15 @@ async function execute(context: RunnerContext): Promise<RunState> {
       await writeRunState(context.repositoryRoot, state);
     }
   } catch (error) {
+    if (error instanceof LeaseSuperseded || error instanceof LeaseGenerationMismatchError) {
+      return await loadRunState(context.repositoryRoot, state.id);
+    }
+    if (error instanceof AbortRun) {
+      finalizeAbortedState(state, error.message);
+      await emit(context, "run.aborted", error.message, error.stageId);
+      await writeRunState(context.repositoryRoot, state);
+      return state;
+    }
     if (error instanceof PauseRun) {
       state.status = "paused";
       state.pauseKind = error.kind;
@@ -323,6 +403,7 @@ async function execute(context: RunnerContext): Promise<RunState> {
       return state;
     }
     state.status = "failed";
+    if (isSafetyBoundaryError(error)) state.pauseKind = "workspace_drift";
     state.pauseReason = errorMessage(error);
     await emit(context, "run.failed", errorMessage(error));
     await writeRunState(context.repositoryRoot, state);
@@ -332,6 +413,7 @@ async function execute(context: RunnerContext): Promise<RunState> {
 
 async function executeStage(context: RunnerContext, stage: TripStage): Promise<void> {
   const stageState = requiredStageState(context.state, stage.id);
+  let shouldPersist = true;
   stageState.status = "running";
   stageState.startedAt ??= new Date().toISOString();
   await emit(context, "stage.started", `Stage ${stage.id} started`, stage.id);
@@ -344,38 +426,79 @@ async function executeStage(context: RunnerContext, stage: TripStage): Promise<v
     stageState.completedAt = new Date().toISOString();
     await emit(context, "stage.completed", `Stage ${stage.id} completed`, stage.id);
   } catch (error) {
-    if (error instanceof PauseRun) throw error;
-    stageState.status = "failed";
-    stageState.pauseReason = errorMessage(error);
-    await emit(context, "stage.failed", `Stage ${stage.id} failed: ${errorMessage(error)}`, stage.id);
-    if (stage.required !== false || context.manifest.settings?.failFast) throw error;
+    if (error instanceof LeaseSuperseded || error instanceof LeaseGenerationMismatchError) {
+      shouldPersist = false;
+      throw error;
+    }
+    if (error instanceof PauseRun || error instanceof AbortRun) throw error;
+    if (isSafetyBoundaryError(error) || context.manifest.settings?.failFast) {
+      stageState.status = "failed";
+      stageState.pauseReason = errorMessage(error);
+      await emit(context, "stage.failed", `Stage ${stage.id} failed at a safety boundary: ${errorMessage(error)}`, stage.id);
+      if (stage.required !== false || context.manifest.settings?.failFast) throw error;
+      return;
+    }
+    if (context.manifest.settings?.continuationPolicy?.bestEffortCompletion === false) {
+      stageState.status = "failed";
+      stageState.pauseReason = errorMessage(error);
+      throw error;
+    }
+    await recordStageFollowUp(context, stage, stageState, `Stage execution error: ${errorMessage(error)}`);
+    stageState.status = "completed";
+    stageState.completionMode = "best-effort";
+    stageState.completedAt = new Date().toISOString();
+    await emit(context, "stage.completed.best_effort", `Stage ${stage.id} completed best-effort; remaining work was recorded for follow-up`, stage.id);
   } finally {
-    await writeRunState(context.repositoryRoot, context.state);
+    if (shouldPersist) await writeRunState(context.repositoryRoot, context.state);
   }
 }
 
 async function runReadonlyStage(context: RunnerContext, stage: TripStage, stageState: StageRunState): Promise<void> {
-  const attemptNum = stageState.attempts.length + 1;
-  const artifactDirectory = attemptDirectory(context, stage.id, attemptNum, "research");
-  const startedAt = new Date().toISOString();
-  const result = await context.backend.run(agentRequest(context, stage, "research", context.workingDirectory, stage.prompt, artifactDirectory));
-  if (!result.success) throw new Error(result.error ?? "readonly agent failed");
-  stageState.lastAgentOutput = result.text;
-  await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/result.md`, result.text);
-  // Record a minimal research attempt
-  stageState.attempts.push({
-    attempt: attemptNum,
-    role: "research",
-    validationResults: [],
-    reviewVerdict: emptyReview(),
-    diffHash: "",
-    asi: {},
-    status: "keep",
-    startedAt,
-    completedAt: new Date().toISOString(),
-  });
-  // Capture research output for injection into dependent implementation prompts
-  if (!context.researchOutput) context.researchOutput = result.text;
+  const retries = context.manifest.settings?.continuationPolicy?.transientRetries ?? 3;
+  let lastError = "readonly agent failed";
+  for (let round = 0; round <= retries; round += 1) {
+    const attemptNum = stageState.attempts.length + 1;
+    const artifactDirectory = attemptDirectory(context, stage.id, attemptNum, "research");
+    const startedAt = new Date().toISOString();
+    const request = agentRequest(context, stage, "research", context.workingDirectory, stage.prompt, artifactDirectory);
+    const result = await runAgent(context, request, `research agent for ${stage.id}`);
+    stageState.lastAgentOutput = result.text;
+    if (result.success) {
+      await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/result.md`, result.text);
+      stageState.attempts.push({
+        attempt: attemptNum,
+        role: "research",
+        validationResults: [],
+        reviewVerdict: emptyReview(),
+        diffHash: "",
+        asi: {},
+        status: "keep",
+        startedAt,
+        completedAt: new Date().toISOString(),
+      });
+      stageState.completionMode = "verified";
+      if (!context.researchOutput) context.researchOutput = result.text;
+      return;
+    }
+    lastError = result.error ?? lastError;
+    stageState.attempts.push({
+      attempt: attemptNum,
+      role: "research",
+      validationResults: [],
+      reviewVerdict: emptyReview(),
+      diffHash: "",
+      asi: { error: lastError },
+      status: "crash",
+      startedAt,
+      completedAt: new Date().toISOString(),
+    });
+    await writeRunState(context.repositoryRoot, context.state);
+  }
+  if (context.manifest.settings?.continuationPolicy?.bestEffortCompletion === false) {
+    throw new Error(`Research could not be completed after ${retries + 1} attempts: ${lastError}`);
+  }
+  stageState.completionMode = "best-effort";
+  await recordStageFollowUp(context, stage, stageState, `Research could not be completed after ${retries + 1} attempts: ${lastError}`);
 }
 
 async function runWriterStage(
@@ -401,23 +524,43 @@ async function runWriterStage(
 
   // Determine initial prompt, injecting research output for first attempt
   let nextPrompt = attemptNum > 0
-    ? recoveryPrompt(stage, latestDecisionDirection(context.state, stage.id))
+    ? recoveryPrompt(stage, context.state, latestDecisionDirection(context.state, stage.id))
     : injectResearch(stage.prompt, context.researchOutput);
 
   const maximumRounds = context.manifest.settings?.reviewPolicy?.maxRepairRounds ?? 4;
-  const maxConsecutiveFailures = context.manifest.settings?.continuationPolicy?.maxConsecutiveFailures ?? 5;
-  // Counts consecutive non-completing attempts (discards + checks_failed).
-  // Reset when the stage passes validation (any real progress). Crashes throw
-  // immediately and bypass this counter.
+  const continuationPolicy = context.manifest.settings?.continuationPolicy;
+  const maxConsecutiveFailures = continuationPolicy?.consecutiveFailureOverride
+    ?? continuationPolicy?.maxConsecutiveFailures
+    ?? 5;
+  const maximumTotalAttempts = continuationPolicy?.autoResumeTurnLimit
+    ?? continuationPolicy?.maxTurns
+    ?? 30;
+  // maxRepairRounds is a focused-strategy window, not a terminal attempt cap.
+  // Semantic work continues automatically while validation/review keeps making
+  // progress, bounded by the total-attempt and consecutive-failure safety rails.
   let consecutiveNonProgress = 0;
-  // Track whether we've already triggered a research escalation for this stage
-  let researchEscalated = false;
+  let consecutiveReviewChurn = 0;
+  let researchEscalations = 0;
 
-  while (stageState.reviewRounds <= maximumRounds) {
-    if (consecutiveNonProgress >= maxConsecutiveFailures) {
-      throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} paused after ${maxConsecutiveFailures} consecutive non-completing attempts.`);
+  while (attemptNum < maximumTotalAttempts) {
+    if (consecutiveNonProgress >= maxConsecutiveFailures || consecutiveReviewChurn >= maxConsecutiveFailures) {
+      const kind = consecutiveReviewChurn >= maxConsecutiveFailures ? "review-only churn" : "non-progressing worker or validation attempts";
+      if (continuationPolicy?.bestEffortCompletion === false) {
+        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} stopped after ${maxConsecutiveFailures} consecutive ${kind}.`);
+      }
+      await completeWriterBestEffort(
+        context,
+        stage,
+        stageState,
+        gitRoot,
+        stageStart,
+        attemptNum,
+        `Reached ${maxConsecutiveFailures} consecutive ${kind}; accepted the safest available cumulative work.`,
+      );
+      return;
     }
-    if (context.state.abortRequested) throw new PauseRun("blocked", stage.id, "Abort requested; stopped before the next agent attempt.");
+    await refreshRunControl(context);
+    if (context.state.abortRequested) throw new AbortRun("Abort requested; stopped before the next agent attempt.", stage.id);
 
     attemptNum += 1;
     const role: AgentRequest["role"] = integration ? "integration" : attemptNum === 1 ? "implementation" : "repair";
@@ -425,9 +568,12 @@ async function runWriterStage(
     const headBefore = await currentHead(gitRoot);
     const attemptStartedAt = new Date().toISOString();
     const artifactDirectory = attemptDirectory(context, stage.id, attemptNum, role);
-    const result = await context.backend.run(agentRequest(context, stage, role, agentCwd, nextPrompt, artifactDirectory));
+    const request = agentRequest(context, stage, role, agentCwd, nextPrompt, artifactDirectory);
+    const result = await runAgent(context, request, `${role} agent for ${stage.id}`);
     stageState.lastAgentOutput = result.text;
     await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/agent-response.md`, result.text || result.error || "");
+    await refreshRunControl(context);
+    if (context.state.abortRequested) throw new AbortRun("Abort requested after the agent attempt completed.", stage.id);
 
     if (!result.success) {
       // Agent execution failed (infrastructure/crash) — fail immediately.
@@ -446,7 +592,14 @@ async function runWriterStage(
         contractHash: stageState.contractHash,
       };
       attemptHistory.push(crashRecord);
-      throw new Error(result.error ?? `${role} agent failed`);
+      consecutiveNonProgress += 1;
+      nextPrompt = repairPrompt(
+        stage,
+        context.state,
+        `The prior ${role} session failed (${result.error ?? "unknown backend failure"}). Inspect the durable worktree, preserve valid work, and continue from the current state.`,
+      );
+      await writeRunState(context.repositoryRoot, context.state);
+      continue;
     }
 
     const headAfter = await currentHead(gitRoot);
@@ -457,13 +610,17 @@ async function runWriterStage(
     const workerReview = normalizeReview(result.text);
     if (workerReview.status !== "complete") {
       const direction = await handleNonCompleteVerdict(context, stage, stageState, workerReview, "worker", agentCwd);
-      const diffHash = sha256(await captureBinaryPatch(gitRoot));
+      const candidatePatch = await captureBinaryPatch(gitRoot);
+      const diffHash = sha256(candidatePatch);
+      const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
       const discardRecord: AttemptRecord = {
         attempt: attemptNum,
         role,
         validationResults: stageState.validationResults,
         reviewVerdict: workerReview,
         diffHash,
+        patchPath,
+        patchSha256: diffHash,
         asi: { source: "worker" },
         status: "discard",
         startedAt: attemptStartedAt,
@@ -474,9 +631,12 @@ async function runWriterStage(
       consecutiveNonProgress++;
       stageState.reviewRounds += 1;
       if (stageState.reviewRounds > maximumRounds) {
-        const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
-        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; consecutiveNonProgress = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
-        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved feedback.`);
+        const next = await advanceRepairStrategy(context, stage, stageState, agentCwd, attemptHistory, direction, researchEscalations);
+        researchEscalations = next.researchEscalations;
+        stageState.reviewRounds = 0;
+        nextPrompt = next.prompt;
+        await writeRunState(context.repositoryRoot, context.state);
+        continue;
       }
       nextPrompt = repairPrompt(stage, context.state, direction);
       await writeRunState(context.repositoryRoot, context.state);
@@ -484,17 +644,21 @@ async function runWriterStage(
     }
 
     await verifyOutputs(agentCwd, stage.outputs ?? []);
-    const validation = await validateStage(context, stage, stageState, agentCwd, integration);
+    const validation = await validateStage(context, stage, stageState, agentCwd, integration, attemptNum);
     if (!validationPassed(validation)) {
       const finding = validationFinding(context, stage, stageState, validation);
       await addFinding(context, finding);
-      const diffHash = sha256(await captureBinaryPatch(gitRoot));
+      const candidatePatch = await captureBinaryPatch(gitRoot);
+      const diffHash = sha256(candidatePatch);
+      const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
       const checksFailedRecord: AttemptRecord = {
         attempt: attemptNum,
         role,
         validationResults: validation,
         reviewVerdict: emptyReview(),
         diffHash,
+        patchPath,
+        patchSha256: diffHash,
         asi: { source: "deterministic-validation" },
         status: "checks_failed",
         startedAt: attemptStartedAt,
@@ -505,15 +669,30 @@ async function runWriterStage(
       consecutiveNonProgress++;
       stageState.reviewRounds += 1;
       if (stageState.reviewRounds > maximumRounds) {
-        const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
-        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; consecutiveNonProgress = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
-        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} validation remained red after ${maximumRounds} repair rounds.`);
+        const next = await advanceRepairStrategy(
+          context,
+          stage,
+          stageState,
+          agentCwd,
+          attemptHistory,
+          "Fix the deterministic validation failures exactly; do not expand scope.",
+          researchEscalations,
+        );
+        researchEscalations = next.researchEscalations;
+        stageState.reviewRounds = 0;
+        nextPrompt = next.prompt;
+        await writeRunState(context.repositoryRoot, context.state);
+        continue;
       }
       nextPrompt = repairPrompt(stage, context.state, "Fix the deterministic validation failures exactly; do not expand scope.");
       continue;
     }
 
-    const reviews = await runReviewers(context, stage, stageState, agentCwd, validation, integration);
+    // Passing deterministic validation is concrete progress. Reviewer-requested
+    // repairs must not be counted as consecutive failed worker/check attempts.
+    consecutiveNonProgress = 0;
+
+    const reviews = await runReviewers(context, stage, agentCwd, validation, integration, attemptNum);
     const synthesis = synthesizeReviews(reviews);
     await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/review-synthesis.json`, `${JSON.stringify(synthesis, null, 2)}\n`);
 
@@ -524,12 +703,15 @@ async function runWriterStage(
       // Capture the patch once; reuse for diffHash and for the artifact in persistWriterBoundary.
       const verifiedPatch = await captureBinaryPatch(gitRoot);
       const diffHash = sha256(verifiedPatch);
+      const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, verifiedPatch);
       const keepRecord: AttemptRecord = {
         attempt: attemptNum,
         role,
         validationResults: validation,
         reviewVerdict: synthesis,
         diffHash,
+        patchPath,
+        patchSha256: diffHash,
         asi: { source: "ensemble-review" },
         status: "keep",
         startedAt: attemptStartedAt,
@@ -551,18 +733,25 @@ async function runWriterStage(
         throw new Error(`stage ${stage.id} cannot complete with unresolved blocking findings`);
       }
       consecutiveNonProgress = 0;
+      consecutiveReviewChurn = 0;
+      stageState.completionMode = "verified";
+      stageState.bestAttempt = attemptNum;
       await persistWriterBoundary(context, stage, stageState, gitRoot, attemptNum, verifiedPatch);
       return;
     }
 
     const direction = await handleNonCompleteVerdict(context, stage, stageState, synthesis, integration ? "integration-review" : "independent-review", agentCwd);
-    const diffHash = sha256(await captureBinaryPatch(gitRoot));
+    const candidatePatch = await captureBinaryPatch(gitRoot);
+    const diffHash = sha256(candidatePatch);
+    const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
     const reviewDiscardRecord: AttemptRecord = {
       attempt: attemptNum,
       role,
       validationResults: validation,
       reviewVerdict: synthesis,
       diffHash,
+      patchPath,
+      patchSha256: diffHash,
       asi: { source: integration ? "integration-review" : "independent-review" },
       status: "discard",
       startedAt: attemptStartedAt,
@@ -570,16 +759,32 @@ async function runWriterStage(
       contractHash: stageState.contractHash,
     };
     attemptHistory.push(reviewDiscardRecord);
-      consecutiveNonProgress++;
-      stageState.reviewRounds += 1;
-      if (stageState.reviewRounds > maximumRounds) {
-        const escalated = await tryResearchEscalation(context, stage, stageState, agentCwd, attemptHistory, researchEscalated);
-        if (escalated) { researchEscalated = true; stageState.reviewRounds = 0; consecutiveNonProgress = 0; nextPrompt = escalated; await writeRunState(context.repositoryRoot, context.state); continue; }
-        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted ${maximumRounds} repair rounds with unresolved review findings.`);
-      }
+    // Deterministic validation passed, but reviewer-only churn still needs its
+    // own bounded rail; validation success must not reset this counter.
+    consecutiveReviewChurn += 1;
+    stageState.reviewRounds += 1;
+    if (stageState.reviewRounds > maximumRounds) {
+      const next = await advanceRepairStrategy(context, stage, stageState, agentCwd, attemptHistory, direction, researchEscalations);
+      researchEscalations = next.researchEscalations;
+      stageState.reviewRounds = 0;
+      nextPrompt = next.prompt;
+      await writeRunState(context.repositoryRoot, context.state);
+      continue;
+    }
     nextPrompt = repairPrompt(stage, context.state, direction);
   }
-  throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} did not reach a verified completion boundary.`);
+  if (continuationPolicy?.bestEffortCompletion === false) {
+    throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted its automatic ${maximumTotalAttempts}-attempt limit.`);
+  }
+  await completeWriterBestEffort(
+    context,
+    stage,
+    stageState,
+    gitRoot,
+    stageStart,
+    attemptNum,
+    `Exhausted the automatic ${maximumTotalAttempts}-attempt repair budget; accepted the safest available cumulative work.`,
+  );
 }
 
 async function runIntegrationStage(context: RunnerContext, stage: TripStage, stageState: StageRunState): Promise<void> {
@@ -653,15 +858,28 @@ async function handleNonCompleteVerdict(
   source: Finding["source"],
   agentCwd: string,
 ): Promise<string> {
-  const findings = findingsFromReview(review, {
+  let findings = findingsFromReview(review, {
     runId: context.state.id,
     stageId: stage.id,
     attempt: stageState.attempts.length,
     source,
   });
+  if ((source === "independent-review" || source === "integration-review") && !review.malformed) {
+    const reconciled = reconcileOpenFindings(context.state.findings, stage.id, findings, {
+      repairAttempt: stageState.attempts.length,
+      changedPaths: stageState.changedPaths,
+      reviewArtifact: `stages/${stage.id}/attempt-${stageState.attempts.length}/review-synthesis.json`,
+      actor: "fresh-reviewer-ensemble",
+      rationale: "A fresh review verified prior open findings and returned the current blocking set.",
+    });
+    findings = reconciled.additions;
+    for (const finding of reconciled.updated) await persistFinding(context.repositoryRoot, finding);
+    if (reconciled.updated.length) await writeRunState(context.repositoryRoot, context.state);
+  }
   for (const finding of findings) await addFinding(context, finding);
   if (review.status === "blocked") {
-    throw new PauseRun("blocked", stage.id, `Stage ${stage.id} is blocked: ${review.rationale}`);
+    return review.recommendedFollowupPrompt
+      ?? `Use best judgement to resolve or safely work around this blocker without expanding scope: ${review.rationale}`;
   }
   if (review.status === "needs_decision") {
     return await resolveDecision(context, stage, review, agentCwd);
@@ -687,23 +905,67 @@ async function resolveDecision(
   await atomicWriteJson(path.join(runRoot(context.repositoryRoot, context.state.id), "decisions", `${request.id}.json`), request);
   await appendRunEvent(context.repositoryRoot, context.state.id, { type: "decision.requested", stageId: stage.id, requestId: request.id });
   const maximum = context.manifest.settings?.decisionPolicy?.maxDecisionRounds ?? 2;
+  const sessionTimeoutMs = context.manifest.settings?.sessionTimeoutMs ?? 30 * 60_000;
+  const decisionTimeoutMs = context.manifest.settings?.continuationPolicy?.decisionTimeoutMs
+    ?? Math.min(sessionTimeoutMs, 5 * 60_000);
   let recommendation: DecisionRecord | undefined;
   for (let attempt = 1; attempt <= maximum; attempt += 1) {
     const artifactDirectory = attemptDirectory(context, stage.id, attempt, "decision");
     const prompt = buildDecisionPrompt(request, decisionContext(context, stage));
-    const result = await context.backend.run(agentRequest(context, stage, "decision", agentCwd, prompt, artifactDirectory, ["read", "grep", "find", "ls"]));
+    const agentCall = agentRequest(context, stage, "decision", agentCwd, prompt, artifactDirectory, ["read", "grep", "find", "ls"]);
+    const result = await runAgent(context, agentCall, `decision agent for ${stage.id}`, decisionTimeoutMs);
     if (!result.success) continue;
     recommendation = parseDecision(result.text, request, "agent");
     if (recommendation) break;
   }
-  if (!recommendation) throw new PauseRun("blocked", stage.id, `Decision agent could not produce a valid decision after ${maximum} attempts.`);
+  if (!recommendation) {
+    const choice = request.recommendation ?? request.options[0]?.id ?? "safest-reversible-in-scope-option";
+    const selected = request.options.find((option) => option.id === choice);
+    recommendation = {
+      id: `decision-${randomUUID()}`,
+      requestId: request.id,
+      runId: context.state.id,
+      stageId: stage.id,
+      actor: "agent",
+      source: "auto",
+      status: "decided",
+      choice,
+      rationale: `Decision sessions did not return a valid answer after ${maximum} attempts. The runtime selected the safest reversible in-scope option and recorded this fallback for follow-up.`,
+      implementationDirection: selected?.description
+        ?? review.recommendedFollowupPrompt
+        ?? "Choose the safest reversible implementation that satisfies the existing path contract and validation commands.",
+      assumptions: ["No human response was required to keep the prompt chain live."],
+      createdAt: new Date().toISOString(),
+    };
+    await addFinding(context, {
+      id: `finding-${randomUUID()}`,
+      runId: context.state.id,
+      stageId: stage.id,
+      attempt: context.state.stageStates[stage.id]?.attempts.length ?? 0,
+      source: "operator",
+      severity: "minor",
+      blocking: false,
+      summary: "Autonomous fallback decision was used",
+      evidence: recommendation.rationale,
+      suggestedRemediation: "Review the recorded decision after the run and override it in a follow-up if better product context is available.",
+      affectedPaths: context.state.stageStates[stage.id]?.changedPaths ?? [],
+      disposition: "follow-up-created",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  if (recommendation.status === "blocked") {
+    recommendation.status = "decided";
+    recommendation.source = "auto";
+    recommendation.choice ??= request.recommendation ?? request.options[0]?.id ?? "safest-reversible-in-scope-option";
+    recommendation.implementationDirection ??= review.recommendedFollowupPrompt
+      ?? "Use the safest reversible in-scope implementation and record unresolved trade-offs for follow-up.";
+  }
   context.state.decisions.push(recommendation);
   await atomicWriteJson(path.join(runRoot(context.repositoryRoot, context.state.id), "decisions", `${recommendation.id}.json`), recommendation);
   await appendRunEvent(context.repositoryRoot, context.state.id, { type: "decision.agent.recorded", stageId: stage.id, decisionId: recommendation.id, status: recommendation.status });
-  if (recommendation.status === "blocked") throw new PauseRun("blocked", stage.id, recommendation.rationale);
-  if (context.state.decisionMode === "human") {
-    throw new PauseRun("decision_pending", stage.id, `Human decision required. Agent recommendation: ${recommendation.choice ?? recommendation.implementationDirection ?? recommendation.rationale}`);
-  }
+  // Human mode still records the recommendation, but no longer wedges the run.
+  // A human can review/override the durable decision after completion.
   return recommendation.implementationDirection ?? recommendation.choice ?? recommendation.rationale;
 }
 
@@ -713,6 +975,7 @@ async function validateStage(
   stageState: StageRunState,
   cwd: string,
   integration: boolean,
+  attemptNum: number,
 ): Promise<ValidationResult[]> {
   const commands = unique([
     ...(stage.validationCommands?.length ? stage.validationCommands : context.manifest.settings?.defaultValidationCommands ?? []),
@@ -720,17 +983,17 @@ async function validateStage(
   ]);
   const results = await runValidationCommands(cwd, commands, context.manifest.settings?.commandTimeoutMs ?? 15 * 60_000);
   stageState.validationResults = results;
-  await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${stageState.attempts}/validation.json`, `${JSON.stringify(results, null, 2)}\n`);
+  await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/validation.json`, `${JSON.stringify(results, null, 2)}\n`);
   return results;
 }
 
 async function runReviewers(
   context: RunnerContext,
   stage: TripStage,
-  stageState: StageRunState,
   cwd: string,
   validation: ValidationResult[],
   integration: boolean,
+  attemptNum: number,
 ): Promise<NormalizedReview[]> {
   if (context.manifest.settings?.reviewPolicy?.required === false) return [normalizeReview("<status>complete</status><risk>low</risk><rationale>Review disabled by manifest policy.</rationale>")];
   const count = context.manifest.settings?.reviewPolicy?.reviewerCount ?? 2;
@@ -742,13 +1005,13 @@ async function runReviewers(
   ];
   return await Promise.all(Array.from({ length: count }, async (_, index) => {
     const prompt = reviewPrompt(context, stage, validation, open, angles[index % angles.length] ?? "correctness", integration);
-    const currentAttemptCount = stageState.attempts.length;
-    const artifactDirectory = attemptDirectory(context, stage.id, currentAttemptCount, `reviewer-${index + 1}`);
-    const result = await context.backend.run(agentRequest(context, stage, "review", cwd, prompt, artifactDirectory, ["read", "grep", "find", "ls"]));
+    const artifactDirectory = attemptDirectory(context, stage.id, attemptNum, `reviewer-${index + 1}`);
+    const request = agentRequest(context, stage, "review", cwd, prompt, artifactDirectory, ["read", "grep", "find", "ls"]);
+    const result = await runAgent(context, request, `reviewer ${index + 1} for ${stage.id}`);
     const review = result.success
       ? normalizeReview(result.text)
       : normalizeReview(`<status>blocked</status><risk>high</risk><rationale>Reviewer session failed: ${escapeXml(result.error ?? "unknown error")}</rationale>`);
-    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${currentAttemptCount}/review-${index + 1}.json`, `${JSON.stringify(review, null, 2)}\n`);
+    await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/review-${index + 1}.json`, `${JSON.stringify(review, null, 2)}\n`);
     return review;
   }));
 }
@@ -890,7 +1153,7 @@ function validationFinding(
 function repairPrompt(stage: TripStage, state: RunState, direction: string): string {
   const findings = openBlockingFindings(state.findings, stage.id);
   const decision = latestDecisionDirection(state, stage.id);
-  return `Repair the current frozen stage. Do not advance to other work and do not expand scope.
+  return `Repair the current frozen stage. Do not advance to other work and do not expand scope. All in-contract edits from prior attempts remain in the working tree: inspect them, build on them, and preserve correct work rather than restarting from scratch.
 
 ORIGINAL STAGE
 ${stage.prompt}
@@ -912,10 +1175,14 @@ After repairing, run the targeted checks you can run. Do not commit. End with:
 <recommendedFollowupPrompt>next action if not complete</recommendedFollowupPrompt>`;
 }
 
-function recoveryPrompt(stage: TripStage, decision: string | undefined): string {
+function recoveryPrompt(stage: TripStage, state: RunState, decision: string | undefined): string {
+  const open = openBlockingFindings(state.findings, stage.id);
   return `Recover and complete an interrupted stage. Partial edits are EXPECTED in the working tree — your own from an earlier attempt, and, in a shared checkout, in-contract changes from prior stages (schema, generated code, fixtures, helpers). Treat all of them as expected and in-contract: inspect them, build on them, and keep them. Do not revert them, do not treat them as foreign or "host-owned", and do not pause or block because they are present. Do not repeat already-completed work blindly.
 
 ${stage.prompt}
+
+OPEN BLOCKING FINDINGS
+${formatOpenFindings(open)}
 
 ${decision ? `Previously resolved decision:\n${decision}\n` : ""}
 Stay inside your allowed paths — editing any file that matches them is in-contract. Do not commit. Return the required structured status.`;
@@ -1013,7 +1280,13 @@ function attemptDirectory(context: RunnerContext, stageId: string, attempt: numb
 }
 
 function validationPassed(results: ValidationResult[]): boolean {
-  return results.every((result) => result.exitCode === 0 && !result.timedOut);
+  return results.every((result) => result.exitCode === 0 && !result.timedOut && !isEmptyTestSuccess(result));
+}
+
+function isEmptyTestSuccess(result: ValidationResult): boolean {
+  if (!/\b(?:test|tests|jest|vitest|mocha|playwright|ava)\b/i.test(result.command)) return false;
+  const output = `${result.stdout}\n${result.stderr}`;
+  return /no test files found|no tests found|no test files|ran 0 tests|0 tests? (?:run|executed|collected)/i.test(output);
 }
 
 function newStageState(id: string): StageRunState {
@@ -1049,23 +1322,51 @@ function injectResearch(prompt: string, researchOutput: string | undefined): str
   return `${prompt}\n\nRESEARCH CONTEXT\nThe following research was gathered by the research stage and should inform your implementation:\n${researchOutput}`;
 }
 
+async function advanceRepairStrategy(
+  context: RunnerContext,
+  stage: TripStage,
+  _stageState: StageRunState,
+  agentCwd: string,
+  attemptHistory: AttemptRecord[],
+  direction: string,
+  researchEscalations: number,
+): Promise<{ prompt: string; researchEscalations: number }> {
+  const continuation = context.manifest.settings?.continuationPolicy;
+  const stagnationRounds = continuation?.stagnationRounds ?? 2;
+  const maxResearchEscalations = continuation?.maxResearchEscalations
+    ?? context.manifest.settings?.researchPolicy?.maxRounds
+    ?? 3;
+  const stagnant = isStagnant(attemptHistory, stagnationRounds);
+
+  if (stagnant && researchEscalations < maxResearchEscalations) {
+    const escalated = await tryResearchEscalation(context, stage, agentCwd, attemptHistory, stagnationRounds);
+    if (escalated) {
+      return { prompt: escalated, researchEscalations: researchEscalations + 1 };
+    }
+  }
+
+  const strategy = stagnant
+    ? "The previous attempts are stagnant. Re-inspect the actual diff and tests, challenge the prior approach, identify the root cause, and try a materially different repair."
+    : "The focused repair window ended while the diff, validation, or reviewer findings were still evolving. Continue automatically from the current worktree and close the remaining findings.";
+  return {
+    prompt: repairPrompt(stage, context.state, `${direction}\n\nAUTOMATIC STRATEGY TRANSITION\n${strategy}`),
+    researchEscalations,
+  };
+}
+
 /**
- * Attempts to escalate the repair loop via the configured research hook when the
- * stage is stagnant. Returns a new nextPrompt string with research context injected
- * if escalation succeeds, or undefined if escalation should not be attempted.
+ * Attempts to escalate a stagnant repair loop via the configured research hook.
  */
 async function tryResearchEscalation(
   context: RunnerContext,
   stage: TripStage,
-  stageState: StageRunState,
   agentCwd: string,
   attemptHistory: AttemptRecord[],
-  alreadyEscalated: boolean,
+  stagnationRounds: number,
 ): Promise<string | undefined> {
-  if (alreadyEscalated) return undefined;
   const policy = context.manifest.settings?.researchPolicy;
   if (!policy?.hookCommand) return undefined;
-  if (!isStagnant(attemptHistory)) return undefined;
+  if (!isStagnant(attemptHistory, stagnationRounds)) return undefined;
   const hookResult = await spawnResearchHook(
     policy.hookCommand,
     agentCwd,
@@ -1089,7 +1390,12 @@ function requiredStageState(state: RunState, id: string): StageRunState {
   return value;
 }
 
-async function reconcileInterruptedStages(repository: string, state: RunState): Promise<void> {
+async function reconcileInterruptedStages(
+  repository: string,
+  state: RunState,
+  recoverFailed = false,
+  adoptCurrentHead = false,
+): Promise<void> {
   const current = await currentHead(repository);
   const journalPath = path.join(runRoot(repository, state.id), "integration", "journal.json");
   const journal = await readOptionalJson(journalPath) as {
@@ -1102,6 +1408,30 @@ async function reconcileInterruptedStages(repository: string, state: RunState): 
     state.status = "completed";
     state.completedAt ??= new Date().toISOString();
     return;
+  }
+
+  if (current !== state.baseRevision && adoptCurrentHead) {
+    // Explicit recovery only: force the operator to checkpoint all source changes
+    // first, so adopting HEAD cannot silently absorb an ambiguous dirty workspace.
+    try {
+      await assertCleanCheckout(repository);
+    } catch (error) {
+      throw new Error(`workspace drift: --adopt-current-head requires source changes to be committed or stashed first. ${errorMessage(error)}`);
+    }
+    const previousBaseRevision = state.baseRevision;
+    const adoptedAt = new Date().toISOString();
+    await atomicWriteJson(
+      path.join(runRoot(repository, state.id), "recovery", `pre-head-adoption-${adoptedAt.replaceAll(":", "-")}.json`),
+      state,
+    );
+    state.baseRevision = current;
+    await appendRunEvent(repository, state.id, {
+      type: "run.head.adopted",
+      previousBaseRevision,
+      baseRevision: current,
+      adoptedAt,
+    });
+    await writeRunState(repository, state);
   }
 
   if (current !== state.baseRevision) {
@@ -1137,14 +1467,15 @@ async function reconcileInterruptedStages(repository: string, state: RunState): 
 
   const interrupted = state.manifest.stages.filter((stage) => {
     const status = state.stageStates[stage.id]?.status;
-    return status === "running" || status === "paused";
+    return status === "running" || status === "paused" || (recoverFailed && (status === "failed" || status === "skipped"));
   });
   const interruptedSameCheckout = interrupted.filter((stage) => stage.isolation === "same-checkout");
   if (interruptedSameCheckout.length) {
     const currentPaths = (await changedPaths(repository)).filter((value) => !isRuntimePath(value) && !isIgnorableDirtyPath(value));
     const authorizedStages = state.manifest.stages.filter((stage) => {
       const status = state.stageStates[stage.id]?.status;
-      return stage.isolation === "same-checkout" && (status === "completed" || status === "running" || status === "paused");
+      return stage.isolation === "same-checkout"
+        && (status === "completed" || status === "running" || status === "paused" || (recoverFailed && status === "failed"));
     });
     const allowed = authorizedStages.flatMap((stage) => (stage.allowedPaths ?? []).map((pattern) => withPackagePrefix(path.relative(repository, state.manifest.workingDirectory), pattern)));
     const violations = currentPaths.filter((value) => !allowed.some((pattern) => assertPathCovered(value, [pattern])));
@@ -1186,6 +1517,96 @@ async function readOptionalJson(file: string): Promise<unknown | undefined> {
   }
 }
 
+function finalizeAbortedState(state: RunState, reason: string): void {
+  state.status = "aborted";
+  state.abortRequested = true;
+  state.completedAt = new Date().toISOString();
+  state.pauseKind = "blocked";
+  state.pauseReason = reason;
+  for (const stageState of Object.values(state.stageStates)) {
+    if (stageState.status !== "running") continue;
+    stageState.status = "paused";
+    stageState.pauseReason = reason;
+  }
+}
+
+async function refreshRunControl(context: RunnerContext): Promise<void> {
+  const durable = await loadRunState(context.repositoryRoot, context.state.id);
+  if (context.state.lease && durable.lease?.generation !== context.state.lease.generation) {
+    throw new LeaseSuperseded(`run ${context.state.id} lease was superseded by a newer worker`);
+  }
+  if (durable.abortRequested) context.state.abortRequested = true;
+}
+
+function startLeaseHeartbeat(context: RunnerContext): () => Promise<void> {
+  const lease = context.state.lease;
+  if (!lease) return async () => {};
+  const intervalMs = Math.max(1_000, Math.floor(lease.leaseTimeoutMs / 3));
+  const stopTimeoutMs = context.manifest.settings?.continuationPolicy?.heartbeatStopTimeoutMs ?? 5_000;
+  let pending: Promise<void> | undefined;
+  let lastFailure: string | undefined;
+  const timer = setInterval(() => {
+    // Never queue unbounded writes behind a wedged filesystem operation. A stale
+    // lease lets the detached reaper reclaim this generation instead.
+    if (pending) return;
+    pending = heartbeatRunLease(context.repositoryRoot, context.state.id, lease.generation)
+      .then(async (renewed) => {
+        if (!renewed) throw new LeaseSuperseded();
+        if (lastFailure) {
+          lastFailure = undefined;
+          await withTimeout(
+            Promise.resolve(context.onEvent?.({ type: "lease.heartbeat.recovered", message: `Lease heartbeat recovered for ${context.state.id}` })),
+            1_000,
+            "heartbeat recovery notification",
+          );
+        }
+      })
+      .catch(async (error) => {
+        lastFailure = errorMessage(error);
+        if (error instanceof LeaseSuperseded) clearInterval(timer);
+        try {
+          await withTimeout(
+            Promise.all([
+              Promise.resolve(context.onEvent?.({ type: "lease.heartbeat.failed", message: `Lease heartbeat failed: ${lastFailure}` })),
+              appendRunEvent(context.repositoryRoot, context.state.id, {
+                type: "lease.heartbeat.failed",
+                generation: lease.generation,
+                error: lastFailure,
+              }),
+            ]),
+            1_000,
+            "heartbeat failure telemetry",
+          );
+        } catch {
+          // The external reaper observes durable expiry even if telemetry fails.
+        }
+      })
+      .finally(() => {
+        pending = undefined;
+      });
+  }, intervalMs);
+  timer.unref();
+  return async () => {
+    clearInterval(timer);
+    const stopped = await waitForHeartbeatStop(pending ?? Promise.resolve(), stopTimeoutMs);
+    if (!stopped) {
+      try {
+        await withTimeout(
+          appendRunEvent(context.repositoryRoot, context.state.id, {
+            type: "lease.heartbeat.stop_timeout",
+            timeoutMs: stopTimeoutMs,
+            lastFailure,
+          }),
+          1_000,
+          "heartbeat stop-timeout event write",
+        );
+      } catch {
+        // Never let telemetry wedge run shutdown.
+      }
+    }
+  };
+}
+
 async function emit(context: RunnerContext, type: string, message: string, stageId?: string): Promise<void> {
   // Update lease heartbeat on every event (stage transitions)
   if (context.state.lease) {
@@ -1207,6 +1628,211 @@ function unique(values: string[]): string[] {
 
 function escapeXml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+async function runAgent(
+  context: RunnerContext,
+  request: AgentRequest,
+  label: string,
+  timeoutOverrideMs?: number,
+): Promise<AgentResult> {
+  const timeoutMs = timeoutOverrideMs
+    ?? context.manifest.settings?.continuationPolicy?.agentCallTimeoutMs
+    ?? request.timeoutMs
+    ?? context.manifest.settings?.sessionTimeoutMs
+    ?? 30 * 60_000;
+  const startedAt = Date.now();
+  try {
+    return await withTimeout(
+      Promise.resolve().then(async () => await context.backend.run(request)),
+      timeoutMs,
+      label,
+    );
+  } catch (error) {
+    const message = errorMessage(error);
+    try {
+      await withTimeout(
+        appendRunEvent(context.repositoryRoot, context.state.id, {
+          type: "agent.call.failed",
+          stageId: request.stageId,
+          role: request.role,
+          error: message,
+          timeoutMs,
+        }),
+        1_000,
+        "agent failure event write",
+      );
+    } catch {
+      // The durable lease/reaper is the fallback when the event filesystem is unavailable.
+    }
+    return { success: false, text: "", error: message, durationMs: Date.now() - startedAt };
+  }
+}
+
+async function completeWriterBestEffort(
+  context: RunnerContext,
+  stage: TripStage,
+  stageState: StageRunState,
+  gitRoot: string,
+  stageStart: Record<string, string>,
+  attemptNum: number,
+  reason: string,
+): Promise<void> {
+  const best = stageState.attempts.reduce<AttemptRecord | undefined>(
+    (current, candidate) => !current || isBetter(candidate, current) ? candidate : current,
+    undefined,
+  );
+  if (best?.patchPath && best.patchSha256) {
+    const bestPatch = await readFile(best.patchPath);
+    if (sha256(bestPatch) !== best.patchSha256) {
+      throw new Error(`best-attempt patch hash mismatch: ${stage.id} attempt ${best.attempt}`);
+    }
+    const currentPatch = await captureBinaryPatch(gitRoot);
+    if (sha256(currentPatch) !== best.patchSha256) {
+      await git(gitRoot, ["reset", "--hard", "HEAD"]);
+      await git(gitRoot, ["clean", "-fd"]);
+      await applyPatch(gitRoot, bestPatch);
+      await appendRunEvent(context.repositoryRoot, context.state.id, {
+        type: "stage.best_attempt.restored",
+        stageId: stage.id,
+        attempt: best.attempt,
+        patchSha256: best.patchSha256,
+      });
+    }
+  }
+  const finalDelta = await calculateStageDelta(gitRoot, stageStart);
+  enforcePathContract(context, stage, finalDelta.changedDuring);
+  stageState.changedPaths = finalDelta.changedDuring;
+  stageState.completionMode = "best-effort";
+  stageState.bestAttempt = best?.attempt;
+
+  const now = new Date().toISOString();
+  for (const finding of context.state.findings.filter((entry) => entry.stageId === stage.id && entry.disposition === "open")) {
+    finding.disposition = "follow-up-created";
+    finding.updatedAt = now;
+    finding.resolutionEvidence = {
+      repairAttempt: attemptNum,
+      changedPaths: finalDelta.changedDuring,
+      actor: "best-effort-runtime",
+      rationale: reason,
+    };
+    await persistFinding(context.repositoryRoot, finding);
+  }
+  await recordStageFollowUp(
+    context,
+    stage,
+    stageState,
+    `${reason}${best ? ` Best evidence came from attempt ${best.attempt} (${best.status}).` : " No usable agent attempt completed."}`,
+  );
+  const patch = await captureBinaryPatch(gitRoot);
+  await persistBestEffortBoundary(context, stage, stageState, attemptNum, patch);
+}
+
+async function persistBestEffortBoundary(
+  context: RunnerContext,
+  stage: TripStage,
+  stageState: StageRunState,
+  attemptNum: number,
+  patch: Buffer,
+): Promise<void> {
+  const relative = `stages/${stage.id}/${stage.isolation === "worktree" ? "patch.diff" : "cumulative.patch.diff"}`;
+  const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, relative, patch);
+  const digest = sha256(patch);
+  if (stage.isolation === "worktree") {
+    stageState.patchPath = patchPath;
+    stageState.patchSha256 = digest;
+  } else {
+    stageState.cumulativePatchPath = patchPath;
+    stageState.cumulativePatchSha256 = digest;
+  }
+  await appendRunEvent(context.repositoryRoot, context.state.id, {
+    type: "stage.boundary.best_effort",
+    stageId: stage.id,
+    attempt: attemptNum,
+    patchSha256: digest,
+    changedPaths: stageState.changedPaths,
+    followUpArtifact: stageState.followUpArtifact,
+  });
+  await writeRunState(context.repositoryRoot, context.state);
+}
+
+async function recordStageFollowUp(
+  context: RunnerContext,
+  stage: TripStage,
+  stageState: StageRunState,
+  reason: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const existing = context.state.findings.find((finding) => finding.stageId === stage.id
+    && finding.source === "operator"
+    && finding.summary === "Best-effort completion requires follow-up");
+  if (existing) {
+    existing.evidence = `${existing.evidence}\n\n${reason}`;
+    existing.updatedAt = now;
+    await persistFinding(context.repositoryRoot, existing);
+  } else {
+    await addFinding(context, {
+      id: `finding-${randomUUID()}`,
+      runId: context.state.id,
+      stageId: stage.id,
+      attempt: stageState.attempts.length,
+      source: "operator",
+      severity: "minor",
+      blocking: false,
+      summary: "Best-effort completion requires follow-up",
+      evidence: reason,
+      suggestedRemediation: "Review this note after the full chain completes; preserve completed work and address only the remaining gap.",
+      affectedPaths: stageState.changedPaths,
+      disposition: "follow-up-created",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  const notes = context.state.findings.filter((finding) => finding.stageId === stage.id && finding.disposition === "follow-up-created");
+  const markdown = [
+    `# Follow-ups for ${stage.id}`,
+    "",
+    `Completion mode: best-effort`,
+    stageState.bestAttempt ? `Best attempt: ${stageState.bestAttempt}` : "Best attempt: none",
+    "",
+    ...notes.flatMap((finding) => [
+      `## ${finding.summary}`,
+      "",
+      finding.evidence || "No additional evidence was captured.",
+      finding.suggestedRemediation ? `\nNext: ${finding.suggestedRemediation}` : "",
+      "",
+    ]),
+  ].join("\n");
+  stageState.followUpArtifact = await writeArtifact(
+    context.repositoryRoot,
+    context.state.id,
+    `stages/${stage.id}/follow-ups.md`,
+    `${markdown.trim()}\n`,
+  );
+  await writeRunState(context.repositoryRoot, context.state);
+}
+
+async function writeRunFollowUpSummary(context: RunnerContext): Promise<void> {
+  const notes = context.state.findings.filter((finding) => finding.disposition === "follow-up-created" || finding.disposition === "accepted-risk");
+  if (!notes.length) return;
+  const markdown = [
+    `# Follow-ups for ${context.state.id}`,
+    "",
+    "The prompt chain completed all safe work. These items were deliberately deferred instead of wedging the run.",
+    "",
+    ...notes.flatMap((finding) => [
+      `## ${finding.stageId}: ${finding.summary}`,
+      "",
+      finding.evidence || "No additional evidence was captured.",
+      finding.suggestedRemediation ? `\nNext: ${finding.suggestedRemediation}` : "",
+      "",
+    ]),
+  ].join("\n");
+  await writeArtifact(context.repositoryRoot, context.state.id, "follow-ups.md", `${markdown.trim()}\n`);
+}
+
+function isSafetyBoundaryError(error: unknown): boolean {
+  return /outside (?:its )?allowed path contract|out-of-scope paths|HEAD moved|patch hash mismatch|workspace drift|direct commit|immutable run base revision/i.test(errorMessage(error));
 }
 
 function backendForManifest(manifest: TripManifest): AgentBackend {

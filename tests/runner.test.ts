@@ -102,6 +102,108 @@ test("runtime closes free-form feedback before advancing", async () => {
   assert.equal(state.findings[0]?.disposition, "resolved");
   assert.equal(await readFile(path.join(repository, "src", "clusters.ts"), "utf8"), "export const sortMode = 'initial-order';\n");
   assert.equal(state.stageStates["implement-clusters"]?.status, "completed");
+  const latestAttempt = state.stageStates["implement-clusters"]?.attempts.at(-1)?.attempt;
+  assert.ok(latestAttempt);
+  const validationArtifact = path.join(
+    repository,
+    ".pi",
+    "prompt-chain-hybrid",
+    "runs",
+    state.id,
+    "stages",
+    "implement-clusters",
+    `attempt-${latestAttempt}`,
+    "validation.json",
+  );
+  assert.deepEqual(JSON.parse(await readFile(validationArtifact, "utf8")), []);
+  const reviewArtifact = path.join(path.dirname(validationArtifact), "review-1.json");
+  assert.equal(JSON.parse(await readFile(reviewArtifact, "utf8")).status, "complete");
+});
+
+class ProgressiveRepairBackend implements AgentBackend {
+  reviewCalls = 0;
+  repairCalls = 0;
+  repairPrompts: string[] = [];
+
+  async run(request: AgentRequest): Promise<AgentResult> {
+    if (request.role === "research") return result("Research complete.");
+    if (request.stageId === "impl" && request.role === "implementation") {
+      await mkdir(path.join(request.cwd, "src"), { recursive: true });
+      await writeFile(path.join(request.cwd, "src", "x.ts"), "export const version = 1;\n");
+      return result("<status>complete</status><risk>low</risk><rationale>Initial implementation.</rationale>");
+    }
+    if (request.stageId === "impl" && request.role === "repair") {
+      this.repairCalls += 1;
+      this.repairPrompts.push(request.prompt);
+      await writeFile(path.join(request.cwd, "src", "x.ts"), `export const version = ${this.repairCalls + 1};\n`);
+      return result("<status>complete</status><risk>low</risk><rationale>Applied the current review feedback.</rationale>");
+    }
+    if (request.stageId === "impl" && request.role === "review") {
+      this.reviewCalls += 1;
+      if (this.reviewCalls === 1) {
+        return result("<status>continue</status><risk>medium</risk><rationale>First repair needed.</rationale><finding><severity>major</severity><blocking>true</blocking><summary>Fix the first behavior</summary><evidence>src/x.ts:1</evidence><remediation>Update version two.</remediation><path>src/x.ts</path></finding>");
+      }
+      if (this.reviewCalls === 2) {
+        return result("<status>continue</status><risk>medium</risk><rationale>The first behavior is fixed; a second repair is needed.</rationale><finding><severity>major</severity><blocking>true</blocking><summary>Cover the second behavior</summary><evidence>src/x.ts:1</evidence><remediation>Update version three.</remediation><path>src/x.ts</path></finding>");
+      }
+      return result("<status>complete</status><risk>low</risk><rationale>All evolving findings are now closed.</rationale>");
+    }
+    if (request.stageId === "integrate" && request.role === "integration") {
+      return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+    }
+    if (request.stageId === "integrate" && request.role === "review") {
+      return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+    }
+    throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+  }
+}
+
+test("runtime continues automatically when progressive repairs exceed the focused round window", async () => {
+  const repository = await createRepository();
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Automatic progressive repair",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      reviewPolicy: { required: true, reviewerCount: 1, maxRepairRounds: 1, malformedVerdict: "continue", requireFreshClosureReviewer: true },
+      continuationPolicy: { autoResumeTurnLimit: 10, consecutiveFailureOverride: 3 },
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      {
+        id: "impl",
+        type: "implementation",
+        needs: ["research"],
+        isolation: "same-checkout",
+        prompt: "Implement and repair until verified.",
+        allowedPaths: ["src/x.ts"],
+        claimedPaths: ["src/x.ts"],
+      },
+      {
+        id: "integrate",
+        type: "integration",
+        needs: ["impl"],
+        isolation: "same-checkout",
+        integrationStrategy: "same-checkout-finalize",
+        prompt: "Integrate.",
+        allowedPaths: ["src/**"],
+      },
+    ],
+  };
+  const manifestPath = path.join(os.tmpdir(), `progressive-repair-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const backend = new ProgressiveRepairBackend();
+
+  const state = await runManifestFile({ manifestPath, backend });
+
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(backend.repairCalls, 2, "the second repair must run beyond maxRepairRounds");
+  assert.match(backend.repairPrompts[1] ?? "", /Cover the second behavior/);
+  assert.doesNotMatch(backend.repairPrompts[1] ?? "", /Fix the first behavior/);
+  assert.equal(state.findings.length, 2);
+  assert.ok(state.findings.every((finding) => finding.disposition === "resolved"));
+  assert.equal(await readFile(path.join(repository, "src", "x.ts"), "utf8"), "export const version = 3;\n");
 });
 
 class ParallelBackend implements AgentBackend {
@@ -196,20 +298,14 @@ test("needs_decision defaults to an autonomous decision agent", async () => {
   assert.equal(await readFile(path.join(repository, "src", "decision.ts"), "utf8"), "export const order = 'initial';\n");
 });
 
-test("human decision flag pauses after an agent recommendation and resumes after a human choice", async () => {
+test("human decision flag records an agent recommendation without wedging autonomous completion", async () => {
   const repository = await createRepository();
   const manifestPath = path.join(os.tmpdir(), `trip-human-decision-${Date.now()}.json`);
   await writeFile(manifestPath, JSON.stringify(decisionManifest(repository)));
-  const backend = new DecisionBackend();
-  const paused = await runManifestFile({ manifestPath, backend, humanDecisions: true });
-  assert.equal(paused.status, "paused");
-  assert.equal(paused.pauseKind, "decision_pending");
-  assert.ok(paused.decisions.some((decision) => decision.actor === "agent"));
-  const { recordHumanDecision, resumeRun } = await import("../src/runner.ts");
-  await recordHumanDecision(repository, paused.id, "initial", "Preserve stable navigation.");
-  const completed = await resumeRun({ repositoryRoot: repository, runId: paused.id, backend });
+  const completed = await runManifestFile({ manifestPath, backend: new DecisionBackend(), humanDecisions: true });
   assert.equal(completed.status, "completed", completed.pauseReason);
-  assert.ok(completed.decisions.some((decision) => decision.actor === "human"));
+  assert.equal(completed.decisionMode, "human");
+  assert.ok(completed.decisions.some((decision) => decision.actor === "agent" && decision.status === "decided"));
 });
 
 test("resume reconciles a result commit from the integration journal", async () => {
@@ -241,10 +337,12 @@ test("resume reconciles a result commit from the integration journal", async () 
   completed.completedAt = undefined;
   completed.stageStates.integrate!.status = "running";
   completed.stageStates.integrate!.completedAt = undefined;
+  completed.lease!.leaseTimeoutMs = 1;
   const { writeRunState } = await import("../src/store.ts");
   await writeRunState(repository, completed);
+  await new Promise((resolve) => setTimeout(resolve, 5));
   const { resumeRun } = await import("../src/runner.ts");
-  const reconciled = await resumeRun({ repositoryRoot: repository, runId: completed.id, backend });
+  const reconciled = await resumeRun({ repositoryRoot: repository, runId: completed.id, backend, externalReaper: false });
   assert.equal(reconciled.status, "completed");
   assert.equal(reconciled.resultCommit, resultCommit);
   const names = await git(repository, ["show", "--pretty=format:", "--name-only", resultCommit!]);
@@ -301,15 +399,17 @@ test("resume reconciles a paused same-checkout run despite out-of-contract dirty
   completed.stageStates.implement!.completedAt = undefined;
   completed.stageStates.integrate!.status = "pending";
   completed.stageStates.integrate!.completedAt = undefined;
+  completed.lease!.leaseTimeoutMs = 1;
   const { writeRunState } = await import("../src/store.ts");
   await writeRunState(repository, completed);
+  await new Promise((resolve) => setTimeout(resolve, 5));
 
   // Stray plan + manifest artifacts, dirty and OUTSIDE the src/** contract.
   await writeFile(path.join(repository, "notes.md"), "# scratch notes\n");
   await writeFile(path.join(repository, "config.json"), JSON.stringify({ stray: true }));
 
   const { resumeRun } = await import("../src/runner.ts");
-  const reconciled = await resumeRun({ repositoryRoot: repository, runId: completed.id, backend });
+  const reconciled = await resumeRun({ repositoryRoot: repository, runId: completed.id, backend, externalReaper: false });
   assert.equal(reconciled.status, "completed", reconciled.pauseReason);
   // The ignorable artifacts were left untouched, not swept into the run.
   assert.equal(await readFile(path.join(repository, "notes.md"), "utf8"), "# scratch notes\n");

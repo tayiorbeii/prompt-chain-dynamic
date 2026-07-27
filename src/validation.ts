@@ -51,6 +51,13 @@ export function normalizeManifest(input: TripManifest): TripManifest {
         requireFreshClosureReviewer: true,
         ...input.settings?.reviewPolicy,
       },
+      continuationPolicy: {
+        reaperEnabled: true,
+        reaperPollIntervalMs: 5_000,
+        heartbeatStopTimeoutMs: 5_000,
+        bestEffortCompletion: true,
+        ...input.settings?.continuationPolicy,
+      },
       defaultValidationCommands: input.settings?.defaultValidationCommands ?? [],
       finalValidationCommands: input.settings?.finalValidationCommands ?? [],
     },
