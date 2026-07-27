@@ -125,7 +125,7 @@ class BestAttemptBackend implements AgentBackend {
   }
 }
 
-test("best-effort exhaustion restores the highest-quality candidate patch", async () => {
+test("best-effort exhaustion retains the final cumulative candidate patch", async () => {
   const repository = await createRepository();
   const manifest: TripManifest = {
     schemaVersion: 1,
@@ -162,8 +162,9 @@ test("best-effort exhaustion restores the highest-quality candidate patch", asyn
   const state = await runManifestFile({ manifestPath, backend: new BestAttemptBackend(), externalReaper: false });
   assert.equal(state.status, "completed", state.pauseReason);
   assert.equal(state.stageStates.implement?.completionMode, "best-effort");
-  assert.equal(state.stageStates.implement?.bestAttempt, 1);
-  assert.equal(await readFile(path.join(repository, "src", "best.ts"), "utf8"), "export const value = 'best';\n");
+  assert.equal(state.stageStates.implement?.bestAttempt, 4);
+  assert.equal(await readFile(path.join(repository, "src", "best.ts"), "utf8"), "export const value = 'worse';\n");
+  assert.match(await readFile(path.join(runRoot(repository, state.id), "events.jsonl"), "utf8"), /stage\.cumulative_attempt\.retained/);
 });
 
 class HangingDecisionBackend implements AgentBackend {

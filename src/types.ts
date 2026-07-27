@@ -324,7 +324,7 @@ export interface StageRunState {
   validationResults: ValidationResult[];
   /** How this stage crossed its durable completion boundary. */
   completionMode?: "verified" | "best-effort";
-  /** Best attempt according to deterministic validation and review evidence. */
+  /** The final cumulative attempt retained at the stage boundary. Kept for state-format compatibility. */
   bestAttempt?: number;
   /** Durable Markdown note containing work deferred after best-effort completion. */
   followUpArtifact?: string;

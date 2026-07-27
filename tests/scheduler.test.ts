@@ -203,10 +203,10 @@ test("resumeRun with a stale generation returns current state without side effec
   assert.equal(returned.status, initial.status, "stale generation should not change run status");
 });
 
-test("consecutive non-progress accepts best effort and records follow-up after the configured rail", async () => {
+test("consecutive non-progress records follow-up after its automatic remediation window", async () => {
   // A backend that always returns "continue" — every attempt is a discard.
-  // With maxConsecutiveFailures: 3, the stage crosses a best-effort boundary
-  // instead of pausing or exhausting all repair rounds.
+  // With maxConsecutiveFailures: 3, the stage opens its bounded automatic
+  // remediation window before it records terminal best-effort follow-up notes.
   const repository = await createRepository();
   const manifest: TripManifest = {
     schemaVersion: 1,
@@ -259,7 +259,7 @@ test("consecutive non-progress accepts best effort and records follow-up after t
   assert.equal(state.stageStates.impl?.completionMode, "best-effort");
   assert.ok(state.stageStates.impl?.followUpArtifact);
   assert.ok(state.findings.some((finding) => finding.stageId === "impl" && finding.disposition === "follow-up-created"));
-  assert.ok(implementationAttempts <= 4, `expected at most 4 attempts (1 impl + 3 repairs), got ${implementationAttempts}`);
+  assert.ok(implementationAttempts <= 8, `expected at most 8 attempts (configured rail plus default remediation window), got ${implementationAttempts}`);
 });
 
 test("resumeRun with current generation increments the lease generation", async () => {

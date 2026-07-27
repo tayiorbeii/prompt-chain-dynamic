@@ -33,7 +33,7 @@ import {
 } from "./review.ts";
 import { buildDecisionPrompt, decisionRequestFromReview, parseDecision } from "./decision.ts";
 import { hashContract } from "./contract.ts";
-import { isBetter, isStagnant } from "./stagnation.ts";
+import { isStagnant } from "./stagnation.ts";
 import { spawnResearchHook } from "./research-hook.ts";
 import { waitForHeartbeatStop, withTimeout } from "./liveness.ts";
 import { spawnRunReapers } from "./reaper-launcher.ts";
@@ -1727,33 +1727,22 @@ async function completeWriterBestEffort(
   attemptNum: number,
   reason: string,
 ): Promise<void> {
-  const best = stageState.attempts.reduce<AttemptRecord | undefined>(
-    (current, candidate) => !current || isBetter(candidate, current) ? candidate : current,
-    undefined,
-  );
-  if (best?.patchPath && best.patchSha256) {
-    const bestPatch = await readFile(best.patchPath);
-    if (sha256(bestPatch) !== best.patchSha256) {
-      throw new Error(`best-attempt patch hash mismatch: ${stage.id} attempt ${best.attempt}`);
-    }
-    const currentPatch = await captureBinaryPatch(gitRoot);
-    if (sha256(currentPatch) !== best.patchSha256) {
-      await git(gitRoot, ["reset", "--hard", "HEAD"]);
-      await git(gitRoot, ["clean", "-fd"]);
-      await applyPatch(gitRoot, bestPatch);
-      await appendRunEvent(context.repositoryRoot, context.state.id, {
-        type: "stage.best_attempt.restored",
-        stageId: stage.id,
-        attempt: best.attempt,
-        patchSha256: best.patchSha256,
-      });
-    }
-  }
+  // Each repair works on the same worktree. Preserve its final cumulative state
+  // at exhaustion rather than resetting it to a previously ranked candidate.
+  const retainedAttempt = stageState.attempts.at(-1);
+  const retainedPatch = await captureBinaryPatch(gitRoot);
   const finalDelta = await calculateStageDelta(gitRoot, stageStart);
   enforcePathContract(context, stage, finalDelta.changedDuring);
   stageState.changedPaths = finalDelta.changedDuring;
   stageState.completionMode = "best-effort";
-  stageState.bestAttempt = best?.attempt;
+  stageState.bestAttempt = retainedAttempt?.attempt;
+  await appendRunEvent(context.repositoryRoot, context.state.id, {
+    type: "stage.cumulative_attempt.retained",
+    stageId: stage.id,
+    attempt: retainedAttempt?.attempt ?? attemptNum,
+    patchSha256: sha256(retainedPatch),
+    changedPaths: finalDelta.changedDuring,
+  });
 
   const now = new Date().toISOString();
   for (const finding of context.state.findings.filter((entry) => entry.stageId === stage.id && entry.disposition === "open")) {
@@ -1771,10 +1760,9 @@ async function completeWriterBestEffort(
     context,
     stage,
     stageState,
-    `${reason}${best ? ` Best evidence came from attempt ${best.attempt} (${best.status}).` : " No usable agent attempt completed."}`,
+    `${reason}${retainedAttempt ? ` Retained the cumulative worktree through attempt ${retainedAttempt.attempt} (${retainedAttempt.status}); no earlier attempt was restored.` : " No usable agent attempt completed."}`,
   );
-  const patch = await captureBinaryPatch(gitRoot);
-  await persistBestEffortBoundary(context, stage, stageState, attemptNum, patch);
+  await persistBestEffortBoundary(context, stage, stageState, attemptNum, retainedPatch);
 }
 
 async function persistBestEffortBoundary(
@@ -1842,7 +1830,7 @@ async function recordStageFollowUp(
     `# Follow-ups for ${stage.id}`,
     "",
     `Completion mode: best-effort`,
-    stageState.bestAttempt ? `Best attempt: ${stageState.bestAttempt}` : "Best attempt: none",
+    stageState.bestAttempt ? `Retained cumulative attempt: ${stageState.bestAttempt}` : "Retained cumulative attempt: none",
     "",
     ...notes.flatMap((finding) => [
       `## ${finding.summary}`,
