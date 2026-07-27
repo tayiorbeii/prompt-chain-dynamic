@@ -77,6 +77,10 @@ export interface ContinuationPolicy {
   reaperEnabled?: boolean;
   /** Accept the best safe attempt and create follow-up notes instead of pausing on exhaustion. */
   bestEffortCompletion?: boolean;
+  /** Automatically open bounded remediation windows before recording unresolved work as follow-ups. Defaults to 1. */
+  automaticFollowUpPasses?: number;
+  /** Attempts allowed in each automatic remediation window. Defaults to 5. */
+  automaticFollowUpAttemptLimit?: number;
   checkpointVerifiedStages?: boolean;
   onRequiredExhaustion?: "research";
   onOptionalExhaustion?: "checkpoint-and-follow-up";

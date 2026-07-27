@@ -532,9 +532,12 @@ async function runWriterStage(
   const maxConsecutiveFailures = continuationPolicy?.consecutiveFailureOverride
     ?? continuationPolicy?.maxConsecutiveFailures
     ?? 5;
-  const maximumTotalAttempts = continuationPolicy?.autoResumeTurnLimit
+  let maximumTotalAttempts = continuationPolicy?.autoResumeTurnLimit
     ?? continuationPolicy?.maxTurns
     ?? 30;
+  const automaticFollowUpPasses = continuationPolicy?.automaticFollowUpPasses ?? 1;
+  const automaticFollowUpAttemptLimit = continuationPolicy?.automaticFollowUpAttemptLimit ?? 5;
+  let automaticFollowUpPass = 0;
   // maxRepairRounds is a focused-strategy window, not a terminal attempt cap.
   // Semantic work continues automatically while validation/review keeps making
   // progress, bounded by the total-attempt and consecutive-failure safety rails.
@@ -542,11 +545,33 @@ async function runWriterStage(
   let consecutiveReviewChurn = 0;
   let researchEscalations = 0;
 
-  while (attemptNum < maximumTotalAttempts) {
-    if (consecutiveNonProgress >= maxConsecutiveFailures || consecutiveReviewChurn >= maxConsecutiveFailures) {
-      const kind = consecutiveReviewChurn >= maxConsecutiveFailures ? "review-only churn" : "non-progressing worker or validation attempts";
+  while (true) {
+    const kind = consecutiveReviewChurn >= maxConsecutiveFailures ? "review-only churn" : "non-progressing worker or validation attempts";
+    const exhausted = attemptNum >= maximumTotalAttempts;
+    const hitFailureRail = consecutiveNonProgress >= maxConsecutiveFailures || consecutiveReviewChurn >= maxConsecutiveFailures;
+    if (exhausted || hitFailureRail) {
+      const reason = exhausted
+        ? `Exhausted the automatic ${maximumTotalAttempts}-attempt repair budget.`
+        : `Reached ${maxConsecutiveFailures} consecutive ${kind}.`;
+      if (continuationPolicy?.bestEffortCompletion !== false
+        && automaticFollowUpPass < automaticFollowUpPasses
+        && automaticFollowUpAttemptLimit > 0) {
+        automaticFollowUpPass += 1;
+        maximumTotalAttempts = attemptNum + automaticFollowUpAttemptLimit;
+        consecutiveNonProgress = 0;
+        consecutiveReviewChurn = 0;
+        stageState.reviewRounds = 0;
+        nextPrompt = repairPrompt(
+          stage,
+          context.state,
+          `AUTOMATIC FOLLOW-UP REMEDIATION PASS ${automaticFollowUpPass}/${automaticFollowUpPasses}\n${reason} Build on the complete current worktree and the prior attempt evidence; do not restart or discard cumulative in-contract work. Resolve the remaining findings with a materially different, evidence-based approach.`,
+        );
+        await emit(context, "stage.follow_up.automatic_started", `Stage ${stage.id} started automatic follow-up remediation pass ${automaticFollowUpPass}/${automaticFollowUpPasses}`, stage.id);
+        await writeRunState(context.repositoryRoot, context.state);
+        continue;
+      }
       if (continuationPolicy?.bestEffortCompletion === false) {
-        throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} stopped after ${maxConsecutiveFailures} consecutive ${kind}.`);
+        throw new PauseRun("review_blocked", stage.id, `${reason} Automatic remediation is disabled by bestEffortCompletion=false.`);
       }
       await completeWriterBestEffort(
         context,
@@ -555,7 +580,7 @@ async function runWriterStage(
         gitRoot,
         stageStart,
         attemptNum,
-        `Reached ${maxConsecutiveFailures} consecutive ${kind}; accepted the safest available cumulative work.`,
+        `${reason} Accepted the safest available cumulative work after automatic follow-up remediation.`,
       );
       return;
     }
@@ -773,18 +798,6 @@ async function runWriterStage(
     }
     nextPrompt = repairPrompt(stage, context.state, direction);
   }
-  if (continuationPolicy?.bestEffortCompletion === false) {
-    throw new PauseRun("review_blocked", stage.id, `Stage ${stage.id} exhausted its automatic ${maximumTotalAttempts}-attempt limit.`);
-  }
-  await completeWriterBestEffort(
-    context,
-    stage,
-    stageState,
-    gitRoot,
-    stageStart,
-    attemptNum,
-    `Exhausted the automatic ${maximumTotalAttempts}-attempt repair budget; accepted the safest available cumulative work.`,
-  );
 }
 
 async function runIntegrationStage(context: RunnerContext, stage: TripStage, stageState: StageRunState): Promise<void> {

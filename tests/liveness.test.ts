@@ -241,6 +241,67 @@ test("an empty test-suite success is treated as non-validation and recorded for 
   assert.match(await readFile(path.join(runRoot(repository, state.id), "follow-ups.md"), "utf8"), /Validation did not pass/);
 });
 
+test("automatic follow-up remediation builds on the current worktree before recording terminal follow-ups", async () => {
+  const repository = await createRepository();
+  let repairs = 0;
+  const backend: AgentBackend = {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      if (request.stageId === "implement" && request.role === "implementation") {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "repair.ts"), "export const repaired = false;\n");
+      } else if (request.stageId === "implement" && request.role === "repair") {
+        repairs += 1;
+        assert.match(request.prompt, /AUTOMATIC FOLLOW-UP REMEDIATION PASS 1\/1/);
+        assert.match(request.prompt, /Build on the complete current worktree/);
+        await writeFile(path.join(request.cwd, "src", "repair.ts"), "export const repaired = true;\n");
+      }
+      return success("<status>complete</status><risk>low</risk><rationale>Work complete.</rationale>");
+    },
+  };
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Automatic follow-up remediation",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      reviewPolicy: { required: false },
+      continuationPolicy: { consecutiveFailureOverride: 1, autoResumeTurnLimit: 1, automaticFollowUpPasses: 1, automaticFollowUpAttemptLimit: 1 },
+    },
+    stages: [
+      {
+        id: "implement",
+        type: "implementation",
+        needs: [],
+        isolation: "same-checkout",
+        prompt: "Implement.",
+        allowedPaths: ["src/**"],
+        claimedPaths: ["src/repair.ts"],
+        validationCommands: ["node -e \"const fs = require('fs'); process.exit(fs.readFileSync('src/repair.ts', 'utf8').includes('true') ? 0 : 1)\""],
+      },
+      {
+        id: "integrate",
+        type: "integration",
+        needs: ["implement"],
+        isolation: "same-checkout",
+        integrationStrategy: "same-checkout-finalize",
+        prompt: "Integrate.",
+        allowedPaths: ["src/**"],
+      },
+    ],
+  };
+  const manifestPath = path.join(os.tmpdir(), `automatic-follow-up-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  const state = await runManifestFile({ manifestPath, backend, externalReaper: false });
+
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(repairs, 1);
+  assert.equal(state.stageStates.implement?.completionMode, "verified");
+  assert.equal(state.findings.some((finding) => finding.disposition === "follow-up-created"), false);
+  assert.match(await readFile(path.join(repository, "src", "repair.ts"), "utf8"), /true/);
+  assert.match(await readFile(path.join(runRoot(repository, state.id), "events.jsonl"), "utf8"), /stage\.follow_up\.automatic_started/);
+});
+
 test("a hanging decision call times out, uses best judgement, and does not pause the chain", async () => {
   const repository = await createRepository();
   const manifest: TripManifest = {
