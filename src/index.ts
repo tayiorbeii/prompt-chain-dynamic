@@ -10,6 +10,7 @@ import { recordHumanDecision, requestAbort, resumeRun, runManifestFile } from ".
 import { Supervisor } from "./supervisor.ts";
 import { auditCompletion } from "./audit.ts";
 import { loadRunState } from "./store.ts";
+import { readRunEvents, formatRunEvent } from "./logs.ts";
 import { formatRunSummary } from "./status.ts";
 import { validateManifest } from "./validation.ts";
 import type { TripManifest } from "./types.ts";
@@ -91,12 +92,16 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("prompt-chain-status", {
-    description: "Show Prompt-chain hybrid run status",
+    description: "Show Prompt-chain hybrid run status, or watch its durable event log with --watch",
     handler: async (args, ctx) => {
       try {
+        const tokens = shellWords(args);
+        const watch = removeFlag(tokens, "--watch");
+        if (tokens.length > 1) return ctx.ui.notify("Usage: /prompt-chain-status [run-id] [--watch]", "warning");
         const repository = await repositoryRoot(ctx.cwd);
-        const runId = args.trim() || await latestRunId(repository);
+        const runId = tokens[0] || await latestRunId(repository);
         if (!runId) return ctx.ui.notify("No Prompt-chain hybrid runs were found in this repository.", "warning");
+        if (watch) return await showRunLogWatcher(ctx, repository, runId);
         const state = await loadRunState(repository, runId);
         await showStatusSummary(ctx, formatRunSummary(state));
       } catch (error) {
@@ -395,6 +400,89 @@ async function showStatusSummary(
         else if (data === "g" || data === "\u001b[H") offset = 0;
         else if (data === "G" || data === "\u001b[F") offset = maxOffset;
         else return;
+        tui.requestRender();
+      },
+    };
+  }, {
+    overlay: true,
+    overlayOptions: { width: "90%", minWidth: 60, maxHeight: "80%", margin: 1 },
+  });
+}
+
+async function showRunLogWatcher(
+  ctx: ExtensionCommandContext,
+  repository: string,
+  runId: string,
+): Promise<void> {
+  const viewHeight = 14;
+  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    let lines = ["Loading durable run events…"];
+    let offset = 0;
+    let maxOffset = 0;
+    let follow = true;
+    let closed = false;
+    const refresh = async (): Promise<void> => {
+      try {
+        const events = await readRunEvents(repository, runId);
+        lines = events.length ? events.map(formatRunEvent) : ["No durable events have been recorded yet."];
+        if (follow) offset = Math.max(0, lines.length - viewHeight);
+      } catch (error) {
+        lines = [`Unable to read the durable event log: ${errorMessage(error)}`];
+        offset = 0;
+      }
+      tui.requestRender();
+    };
+    const timer = setInterval(() => { void refresh(); }, 1_000);
+    void refresh();
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      done();
+    };
+    const renderLines = (width: number): string[] => {
+      const innerWidth = Math.max(1, width - 4);
+      const wrapped = lines.flatMap((line) => wrapStatusSummary(line, innerWidth));
+      maxOffset = Math.max(0, wrapped.length - viewHeight);
+      offset = Math.min(offset, maxOffset);
+      const border = theme.fg("accent", `┌${"─".repeat(innerWidth + 2)}┐`);
+      const divider = theme.fg("accent", `├${"─".repeat(innerWidth + 2)}┤`);
+      const row = (text: string, style: (value: string) => string = (value) => value): string =>
+        `│ ${style(text.slice(0, innerWidth).padEnd(innerWidth))} │`;
+      const visible = wrapped.slice(offset, offset + viewHeight);
+      return [
+        border,
+        row(`Prompt-chain logs — ${runId}`, (value) => theme.fg("accent", theme.bold(value))),
+        row(`${follow ? "Following" : "Paused"} · lines ${offset + 1}-${Math.min(offset + viewHeight, wrapped.length)} of ${wrapped.length} · ↑/↓ scroll · f follow · r refresh · enter/esc close`, (value) => theme.fg("dim", value)),
+        divider,
+        ...visible.map((line) => row(line)),
+        ...Array.from({ length: viewHeight - visible.length }, () => row("")),
+        border.replace("┌", "└").replace("┐", "┘"),
+      ];
+    };
+    return {
+      render: renderLines,
+      invalidate: () => {},
+      handleInput: (data: string) => {
+        if (data === "\u001b" || data === "\r" || data === "\n") return close();
+        if (data === "\u001b[B" || data === "j") {
+          offset = Math.min(maxOffset, offset + 1);
+          follow = offset === maxOffset;
+        } else if (data === "\u001b[A" || data === "k") {
+          offset = Math.max(0, offset - 1);
+          follow = false;
+        } else if (data === " " || data === "\u001b[6~") {
+          offset = Math.min(maxOffset, offset + viewHeight);
+          follow = offset === maxOffset;
+        } else if (data === "\u001b[5~") {
+          offset = Math.max(0, offset - viewHeight);
+          follow = false;
+        } else if (data === "f") {
+          follow = true;
+          offset = maxOffset;
+        } else if (data === "r") {
+          void refresh();
+        } else return;
         tui.requestRender();
       },
     };
