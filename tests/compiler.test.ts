@@ -165,7 +165,13 @@ test("serial writer prompt frames pre-existing tree changes as in-contract and f
   assert.match(prompt, /produced by prior stages/);
   assert.match(prompt, /editable boundary/);
   assert.match(prompt, /Never return needs_decision or blocked for path scope/);
+  assert.match(prompt, /docs\/VISION\.md/);
+  assert.match(prompt, /docs\/ARCHI\.md/);
+  assert.doesNotMatch(prompt, /Read VISION\.md, ARCHI\.md/);
   assert.doesNotMatch(prompt, /do not guess outside the frozen contract/);
+  const research = result.manifest.stages.find((stage) => stage.id === "research");
+  assert.match(research?.prompt ?? "", /docs\/VISION\.md/);
+  assert.match(research?.prompt ?? "", /docs\/ARCHI\.md/);
 });
 
 test("worktree writer prompt describes an isolated clean-base checkout", async () => {

@@ -211,7 +211,7 @@ function buildStages(
     type: "review",
     needs: [],
     isolation: "readonly",
-    prompt: `Read the approved plan at ${sourceGuide}, VISION.md, ARCHI.md, and repository instructions. Confirm the implementation slices, dependencies, risks, and path contracts. Do not edit files. Return a concise context handoff.`,
+    prompt: `Read the approved plan at ${sourceGuide}, docs/VISION.md, docs/ARCHI.md, and repository instructions. Confirm the implementation slices, dependencies, risks, and path contracts. Do not edit files. Return a concise context handoff.`,
     allowedTools: ["read", "grep", "find", "ls"],
     outputs: [],
   };
@@ -279,7 +279,7 @@ ACCEPTANCE CRITERIA
 ${slice.acceptanceCriteria.length ? slice.acceptanceCriteria.map((value) => `- ${value}`).join("\n") : "- Satisfy the plan section and preserve existing behavior outside this slice."}
 
 RULES
-- Read VISION.md, ARCHI.md, and repository instructions first when present.
+- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.
 - Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.
 - When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.
 - Implement behavioral tests for new logic when the plan requires them.

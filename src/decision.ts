@@ -59,7 +59,7 @@ Make the best defensible decision possible. Do not defer merely because multiple
 
 Priority order:
 1. Satisfy the approved requirements and acceptance criteria.
-2. Obey VISION.md, ARCHI.md, and repository instructions.
+2. Obey docs/VISION.md, docs/ARCHI.md, and repository instructions.
 3. Stay inside the stage's allowed paths (its path contract).
 4. Prefer the smallest reversible change.
 5. Preserve backward compatibility and user-visible stability.

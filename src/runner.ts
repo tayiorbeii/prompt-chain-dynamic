@@ -1248,7 +1248,7 @@ function reviewPrompt(
   return `You are a fresh, read-only reviewer. You did not implement this change.
 
 Review focus: ${angle}.
-Review the actual Git diff, the approved stage, VISION.md, ARCHI.md, repository instructions, and deterministic evidence.
+Review the actual Git diff, the approved stage, docs/VISION.md, docs/ARCHI.md, repository instructions, and deterministic evidence.
 ${integration ? "This is the aggregate integration review; verify all approved slices work together." : "This is a slice review."}
 
 APPROVED STAGE
