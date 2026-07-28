@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatRunSummary } from "../src/status.ts";
+import { buildRunSummarySections, formatRunSummary } from "../src/status.ts";
 import type { NormalizedReview, RunState } from "../src/types.ts";
 
 const completeReview: NormalizedReview = {
@@ -208,4 +208,71 @@ test("aborted runs render a stale running stage as interrupted and stop elapsed 
   assert.match(output, /! writer — interrupted by abort \(recorded: running\)/);
   assert.match(output, /Elapsed since start: 9m/);
   assert.match(output, /Lease: generation 2 .* inactive \(aborted\)/);
+});
+
+test("buildRunSummarySections produces collapsible per-step sections consistent with the flat summary", () => {
+  const state: RunState = {
+    formatVersion: 1,
+    id: "trip-20260726-sections",
+    manifestPath: "/repo/plan.json",
+    manifest: {
+      schemaVersion: 1,
+      name: "Sections example",
+      workingDirectory: "/repo",
+      stages: [
+        { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Inspect." },
+        { id: "impl", type: "implementation", needs: ["research"], isolation: "same-checkout", prompt: "Implement." },
+      ],
+    },
+    status: "completed",
+    baseRevision: "abc123",
+    decisionMode: "agent",
+    createdAt: "2026-07-26T00:00:00.000Z",
+    startedAt: "2026-07-26T00:01:00.000Z",
+    updatedAt: "2026-07-26T00:20:00.000Z",
+    completedAt: "2026-07-26T00:20:00.000Z",
+    abortRequested: false,
+    followUpRunIds: ["trip-20260726-followup"],
+    stageStates: {
+      research: { id: "research", status: "completed", attempts: [], reviewRounds: 0, changedPaths: [], validationResults: [] },
+      impl: { id: "impl", status: "completed", attempts: [], reviewRounds: 0, changedPaths: [], validationResults: [] },
+    },
+    findings: [
+      {
+        id: "finding-1",
+        runId: "trip-20260726-sections",
+        stageId: "impl",
+        attempt: 1,
+        source: "operator",
+        severity: "minor",
+        blocking: false,
+        summary: "Best-effort completion requires follow-up",
+        evidence: "Deferred work",
+        affectedPaths: [],
+        disposition: "follow-up-created",
+        createdAt: "2026-07-26T00:10:00.000Z",
+        updatedAt: "2026-07-26T00:10:00.000Z",
+      },
+    ],
+    decisionRequests: [],
+    decisions: [],
+  };
+
+  const requestedAt = new Date("2026-07-26T01:00:00.000Z");
+  const sections = buildRunSummarySections(state, requestedAt);
+  assert.equal(sections.stages.length, 2);
+  assert.match(sections.stages[0]?.title ?? "", /^✓ research — completed$/);
+  assert.match(sections.stages[1]?.title ?? "", /^✓ impl — completed$/);
+  assert.ok(sections.stages.every((stage) => stage.lines.length > 0), "each collapsed step keeps its detail lines");
+  assert.ok(sections.header.some((line) => line === "Deferred follow-up items: 1"));
+  assert.ok(sections.header.some((line) => line === "Follow-up runs: trip-20260726-followup"));
+
+  const flat = formatRunSummary(state, requestedAt);
+  const recomposed = [
+    ...sections.header,
+    "",
+    `Steps (${sections.stages.length}):`,
+    ...sections.stages.flatMap((stage) => [stage.title, ...stage.lines]),
+  ].join("\n");
+  assert.equal(flat, recomposed);
 });

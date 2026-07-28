@@ -96,14 +96,29 @@ docs/REVIEW-CHECKLIST.md
 /prompt-chain-compile <plan.md> [--out file.prompt-chain.json] [--mode auto|serial|parallel]
 /prompt-chain-inspect <file.prompt-chain.json>
 /prompt-chain-validate <file.prompt-chain.json>
-/prompt-chain-run <file.prompt-chain.json> [--human-decisions]
+/prompt-chain-run <file.prompt-chain.json> [--human-decisions] [--no-follow-ups]
+/prompt-chain-supervise <file.prompt-chain.json> [--human-decisions]
 /prompt-chain-status [run-id] [--watch]
-/prompt-chain-resume [run-id]
+/prompt-chain-resume [run-id] [--adopt-current-head] [--no-follow-ups]
+/prompt-chain-follow-ups [run-id] [--rounds N] [--no-audit]
 /prompt-chain-decide <run-id> <choice> :: <rationale>
 /prompt-chain-abort [run-id]
+/prompt-chain-audit [run-id]
 ```
 
-`/prompt-chain-status` reports when the status was requested; run creation, start, update, completion, and elapsed times; lease freshness and abort state; plus per-step task, dependency, timing, attempt, validation, blocker, changed-path, worktree, patch, and verified-commit details. A terminally aborted run cannot display a stale running step as active; it is labeled as interrupted. Add `--watch` to open a live, auto-refreshing view of the run's durable `events.jsonl` log. Newest events are shown at the top while following; use `f` to return to them, `r` to refresh, arrows or `j`/`k` to browse older entries, and Enter/Escape to close.
+### Autonomous completion
+
+`/prompt-chain-run`, `/prompt-chain-supervise`, and `/prompt-chain-resume` do not stop at the end of the DAG. Like the pi-workflows and pi-goal extensions, they drive the run to a *finished result*:
+
+1. The chain executes with its full recovery machinery (repairs, research escalation, lease reaping, best-effort boundaries).
+2. A non-terminal run is handed to the supervisor, which reclaims stale leases and resumes until completed or aborted. A run paused on a pending *human* decision is surfaced instead of spun on.
+3. After completion, every deferred `follow-up-created` finding and every acceptance criterion the completion audit could not verify is compiled into a fresh, validated follow-up manifest (`.pi/prompt-chain-hybrid/runs/<id>/follow-ups/round-N.trip.json`). Follow-up writer steps inherit the original steps' path contracts and validation commands, so remediation stays inside the reviewed scope.
+4. The follow-up run executes with the same recovery machinery. On success the source findings are durably marked resolved with the follow-up run id as evidence, and the parent run records the linkage in `followUpRunIds`. New deferrals feed the next round, up to 3 rounds by default.
+5. A final completion audit is reported alongside the run summary.
+
+Use `--no-follow-ups` for the legacy single-chain behavior, or `/prompt-chain-follow-ups [run-id]` to execute deferred work of an already-completed run later.
+
+`/prompt-chain-status` reports when the status was requested; run creation, start, update, completion, and elapsed times; lease freshness, abort state, deferred follow-up items, and linked follow-up runs; plus per-step task, dependency, timing, attempt, validation, blocker, changed-path, worktree, patch, and verified-commit details. Individual steps are collapsed to a one-line summary by default: use `↑`/`↓` (or `j`/`k`) to select a step, Enter/Space/`l` to expand or collapse it, `e`/`c` to expand or collapse all, PgUp/PgDn to scroll, and Escape/`q` to close. A terminally aborted run cannot display a stale running step as active; it is labeled as interrupted. Add `--watch` to open a live, auto-refreshing view of the run's durable `events.jsonl` log. Newest events are shown at the top while following; use `f` to return to them, `r` to refresh, arrows or `j`/`k` to browse older entries, and Enter/Escape to close.
 
 `/prompt-chain-abort` is durable across Pi processes. Active workers observe the request at the next attempt boundary, while an expired worker lease is aborted immediately. An explicit `/prompt-chain-resume` reopens an aborted run, validates and preserves its in-contract checkout changes, clears the abort request, atomically claims the next lease generation, and continues the interrupted stage. A live lease rejects concurrent resume attempts.
 
@@ -116,9 +131,12 @@ Optional issue-loop commands:
 ```text
 /prompt-chain-issue-add <issues.jsonl> <title> :: <manifest> :: <priority>
 /prompt-chain-issues <issues.jsonl>
+/prompt-chain-loop <issues.jsonl> [--max N] [--human-decisions]
 /prompt-chain-loop-once <issues.jsonl> [--human-decisions]
 /prompt-chain-loop-resume <issues.jsonl> <issue-id>
 ```
+
+`/prompt-chain-loop` drains the backlog autonomously: it claims the highest-priority ready issue, executes its chain to completion (including supervision and follow-up rounds), records the durable issue events, and moves to the next issue until none remain, an issue fails to complete, or the `--max` bound (default 20) is reached. `/prompt-chain-loop-once` and `/prompt-chain-loop-resume` also complete deferred follow-ups before recording the issue terminal event.
 
 Skills:
 

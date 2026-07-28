@@ -28,11 +28,30 @@ if (command === "add") {
   const result = await resumeIssue(eventFile, issueId, { onEvent: (message) => { process.stderr.write(`${message}\n`); } });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (result.run && result.run.status !== "completed") process.exitCode = 2;
+} else if (command === "drain") {
+  const maxFlagIndex = args.indexOf("--max");
+  const max = Math.max(1, Number(maxFlagIndex >= 0 ? args[maxFlagIndex + 1] : 20) || 20);
+  const humanDecisions = args.includes("--human-decisions");
+  const results = [];
+  for (let processed = 0; processed < max; processed += 1) {
+    const result = await processNextIssue({
+      eventFile,
+      humanDecisions,
+      onEvent: (message) => { process.stderr.write(`${message}\n`); },
+    });
+    if (!result.issue) break;
+    results.push({ issueId: result.issue.id, runId: result.run?.id, status: result.run?.status, message: result.message });
+    if (result.run && result.run.status !== "completed") {
+      process.exitCode = 2;
+      break;
+    }
+  }
+  process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
 } else {
   usage();
 }
 
 function usage(): never {
-  process.stderr.write(`usage:\n  trip-loop add <issues.jsonl> "title :: manifest.json :: priority"\n  trip-loop list <issues.jsonl>\n  trip-loop once <issues.jsonl> [--human-decisions]\n  trip-loop resume <issues.jsonl> <issue-id>\n`);
+  process.stderr.write(`usage:\n  trip-loop add <issues.jsonl> "title :: manifest.json :: priority"\n  trip-loop list <issues.jsonl>\n  trip-loop once <issues.jsonl> [--human-decisions]\n  trip-loop drain <issues.jsonl> [--max N] [--human-decisions]\n  trip-loop resume <issues.jsonl> <issue-id>\n`);
   process.exit(64);
 }

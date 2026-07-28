@@ -10,7 +10,7 @@ import {
   selectNextReadyIssue,
 } from "./issues.ts";
 import { resumeRun, runManifestFile } from "./runner.ts";
-import { Supervisor } from "./supervisor.ts";
+import { runFollowUpRounds, superviseToTerminal } from "./followups.ts";
 import { repositoryRoot } from "./git.ts";
 import type { TripManifest } from "./types.ts";
 
@@ -54,24 +54,21 @@ export async function processNextIssue(options: ProcessIssueOptions): Promise<Pr
     ? issue.manifestPath
     : path.resolve(path.dirname(eventFile), issue.manifestPath);
   await options.onEvent?.(`Claimed ${issue.id}: ${issue.title}`);
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
+  const repository = await repositoryRoot(manifest.workingDirectory);
+  const forward = async ({ message }: { message: string }): Promise<void> => await options.onEvent?.(`${issue.id}: ${message}`);
   let run = await runManifestFile({
     manifestPath,
     humanDecisions: options.humanDecisions,
     backend: options.backend,
-    onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
+    onEvent: forward,
   });
-  // If the run is not yet terminal, hand it to the supervisor to resume until done
-  if (run.status !== "completed" && run.status !== "failed" && run.status !== "aborted") {
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
-    const repository = await repositoryRoot(manifest.workingDirectory);
-    const supervisor = new Supervisor({
-      repositoryRoot: repository,
-      runId: run.id,
-      backend: options.backend,
-      onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
-    });
-    run = await supervisor.start();
-  }
+  // If the run is not yet terminal, hand it to the supervisor to resume until done.
+  run = await superviseToTerminal(repository, run, options.backend, forward);
+  // A completed issue is only done once its deferred follow-ups are executed too.
+  const followUpSummary = run.status === "completed"
+    ? await executeIssueFollowUps(repository, run, options.backend, options.humanDecisions, forward)
+    : "";
   const terminalType = run.status === "completed"
     ? "issue.completed"
     : run.status === "paused"
@@ -85,10 +82,29 @@ export async function processNextIssue(options: ProcessIssueOptions): Promise<Pr
       runId: run.id,
       status: run.status,
       resultCommit: run.resultCommit,
-      message: run.pauseReason ?? `Run ${run.status}`,
+      message: `${run.pauseReason ?? `Run ${run.status}`}${followUpSummary}`,
     },
   });
-  return { issue, run, message: `${issue.id} finished with run status ${run.status}.` };
+  return { issue, run, message: `${issue.id} finished with run status ${run.status}.${followUpSummary}` };
+}
+
+async function executeIssueFollowUps(
+  repository: string,
+  run: RunState,
+  backend: AgentBackend | undefined,
+  humanDecisions: boolean | undefined,
+  onEvent: (event: { message: string }) => Promise<void>,
+): Promise<string> {
+  const report = await runFollowUpRounds({
+    repositoryRoot: repository,
+    state: run,
+    backend,
+    humanDecisions,
+    onEvent: async ({ message }) => await onEvent({ message }),
+  });
+  if (!report.runs.length && !report.remainingItems) return "";
+  const rounds = report.runs.map((entry) => `${entry.runId}:${entry.status}`).join(", ");
+  return ` Follow-ups: ${report.runs.length} round(s)${rounds ? ` (${rounds})` : ""}, ${report.remainingItems} deferred item(s) remaining.`;
 }
 
 export async function createIssue(
@@ -134,21 +150,17 @@ export async function resumeIssue(
     : path.resolve(path.dirname(eventFile), issue.manifestPath);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
   const repository = await repositoryRoot(manifest.workingDirectory);
+  const forward = async ({ message }: { message: string }): Promise<void> => await options.onEvent?.(`${issue.id}: ${message}`);
   let run = await resumeRun({
     repositoryRoot: repository,
     runId: issue.runId,
     backend: options.backend,
-    onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
+    onEvent: forward,
   });
-  if (run.status !== "completed" && run.status !== "failed" && run.status !== "aborted") {
-    const supervisor = new Supervisor({
-      repositoryRoot: repository,
-      runId: run.id,
-      backend: options.backend,
-      onEvent: async ({ message }) => await options.onEvent?.(`${issue.id}: ${message}`),
-    });
-    run = await supervisor.start();
-  }
+  run = await superviseToTerminal(repository, run, options.backend, forward);
+  const followUpSummary = run.status === "completed"
+    ? await executeIssueFollowUps(repository, run, options.backend, undefined, forward)
+    : "";
   const type = run.status === "completed" ? "issue.completed" : run.status === "paused" ? "issue.paused" : "issue.failed";
   await appendIssueEvent(eventFile, {
     issueId: issue.id,
@@ -158,8 +170,8 @@ export async function resumeIssue(
       runId: run.id,
       status: run.status,
       resultCommit: run.resultCommit,
-      message: run.pauseReason ?? `Run ${run.status}`,
+      message: `${run.pauseReason ?? `Run ${run.status}`}${followUpSummary}`,
     },
   });
-  return { issue, run, message: `${issue.id} resumed with run status ${run.status}.` };
+  return { issue, run, message: `${issue.id} resumed with run status ${run.status}.${followUpSummary}` };
 }

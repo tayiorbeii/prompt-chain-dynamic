@@ -351,6 +351,8 @@ export interface RunState {
   decisions: DecisionRecord[];
   resultCommit?: string;
   lease?: RunLease;
+  /** Autonomous follow-up runs spawned from this run's deferred findings. */
+  followUpRunIds?: string[];
 }
 
 export interface ManifestValidationIssue {

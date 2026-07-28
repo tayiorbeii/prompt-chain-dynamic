@@ -9,11 +9,17 @@ const STATUS_ICON: Record<StageRunState["status"], string> = {
   skipped: "↷",
 };
 
-export function formatRunSummary(state: RunState, requestedAt = new Date()): string {
+export interface RunSummarySections {
+  header: string[];
+  stages: Array<{ id: string; title: string; lines: string[] }>;
+}
+
+export function buildRunSummarySections(state: RunState, requestedAt = new Date()): RunSummarySections {
   const openBlockers = state.findings.filter((finding) => finding.blocking && finding.disposition === "open");
+  const followUps = state.findings.filter((finding) => finding.disposition === "follow-up-created");
   const terminal = state.status === "completed" || state.status === "failed" || state.status === "aborted";
   const runEnd = state.completedAt ?? (terminal ? state.updatedAt : requestedAt.toISOString());
-  const lines = [
+  const header = [
     `Run: ${state.id} — ${state.manifest.name}`,
     `Status: ${state.status}${state.pauseKind ? ` (${state.pauseKind})` : ""}`,
     `Status requested: ${formatTimestamp(requestedAt.toISOString())}`,
@@ -26,17 +32,27 @@ export function formatRunSummary(state: RunState, requestedAt = new Date()): str
     `Lease: ${formatLease(state, requestedAt)}`,
     `Decision mode: ${state.decisionMode}`,
     `Open blockers: ${openBlockers.length}`,
+    `Deferred follow-up items: ${followUps.length}`,
     `Result commit: ${state.resultCommit ?? "none"}`,
   ];
+  if (state.followUpRunIds?.length) header.push(`Follow-up runs: ${state.followUpRunIds.join(", ")}`);
+  if (state.pauseReason) header.push(`Pause reason: ${state.pauseReason}`);
 
-  if (state.pauseReason) lines.push(`Pause reason: ${state.pauseReason}`);
-  lines.push("", `Steps (${state.manifest.stages.length}):`);
+  const stages = state.manifest.stages.map((stage) => {
+    const lines = formatStage(stage, state.stageStates[stage.id], state.findings, requestedAt, state.status, runEnd);
+    return { id: stage.id, title: lines[0] ?? `? ${stage.id}`, lines: lines.slice(1) };
+  });
+  return { header, stages };
+}
 
-  for (const stage of state.manifest.stages) {
-    lines.push(...formatStage(stage, state.stageStates[stage.id], state.findings, requestedAt, state.status, runEnd));
-  }
-
-  return lines.join("\n");
+export function formatRunSummary(state: RunState, requestedAt = new Date()): string {
+  const sections = buildRunSummarySections(state, requestedAt);
+  return [
+    ...sections.header,
+    "",
+    `Steps (${sections.stages.length}):`,
+    ...sections.stages.flatMap((stage) => [stage.title, ...stage.lines]),
+  ].join("\n");
 }
 
 function formatStage(

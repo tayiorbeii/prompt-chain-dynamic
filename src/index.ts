@@ -7,11 +7,15 @@ import { createIssue, processNextIssue, resumeIssue } from "./controller.ts";
 import { projectIssues, readIssueEvents } from "./issues.ts";
 import { repositoryRoot } from "./git.ts";
 import { recordHumanDecision, requestAbort, resumeRun, runManifestFile } from "./runner.ts";
-import { Supervisor } from "./supervisor.ts";
 import { auditCompletion } from "./audit.ts";
 import { loadRunState } from "./store.ts";
 import { readRunEvents, formatRunEventsNewestFirst } from "./logs.ts";
-import { formatRunSummary } from "./status.ts";
+import { buildRunSummarySections, formatRunSummary, type RunSummarySections } from "./status.ts";
+import {
+  completeChainAutonomously,
+  formatAutonomousReport,
+  runFollowUpRounds,
+} from "./followups.ts";
 import { validateManifest } from "./validation.ts";
 import type { TripManifest } from "./types.ts";
 
@@ -69,21 +73,35 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("prompt-chain-run", {
-    description: "Run a validated Prompt-chain hybrid manifest",
+    description: "Run a Prompt-chain hybrid manifest to full completion, including recoveries and follow-ups",
     handler: async (args, ctx) => {
       const tokens = shellWords(args);
       const humanDecisions = removeFlag(tokens, "--human-decisions");
+      const noFollowUps = removeFlag(tokens, "--no-follow-ups");
       const manifestPath = tokens[0];
-      if (!manifestPath) return ctx.ui.notify("Usage: /prompt-chain-run <manifest.json> [--human-decisions]", "warning");
+      if (!manifestPath) return ctx.ui.notify("Usage: /prompt-chain-run <manifest.json> [--human-decisions] [--no-follow-ups]", "warning");
       ctx.ui.setStatus("prompt-chain-hybrid", "Starting Prompt-chain hybrid run…");
       try {
-        const state = await runManifestFile({
+        const onEvent = ({ message }: { message: string }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100));
+        const initial = await runManifestFile({
           manifestPath: path.resolve(ctx.cwd, manifestPath),
           humanDecisions,
-          onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
+          onEvent,
         });
+        const repository = await repositoryRoot(initial.manifest.workingDirectory);
+        const report = await completeChainAutonomously({
+          repositoryRoot: repository,
+          state: initial,
+          humanDecisions,
+          followUps: !noFollowUps,
+          onEvent,
+        });
+        const state = report.state;
         ctx.ui.setStatus("prompt-chain-hybrid", `${state.id}: ${state.status}`);
-        ctx.ui.notify(formatRunSummary(state), state.status === "completed" ? "info" : state.status === "paused" ? "warning" : "error");
+        ctx.ui.notify(
+          `${formatRunSummary(state)}\n\n${formatAutonomousReport(report)}`,
+          state.status === "completed" ? "info" : state.status === "paused" ? "warning" : "error",
+        );
       } catch (error) {
         ctx.ui.setStatus("prompt-chain-hybrid", "Run failed");
         ctx.ui.notify(errorMessage(error), "error");
@@ -103,7 +121,7 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
         if (!runId) return ctx.ui.notify("No Prompt-chain hybrid runs were found in this repository.", "warning");
         if (watch) return await showRunLogWatcher(ctx, repository, runId);
         const state = await loadRunState(repository, runId);
-        await showStatusSummary(ctx, formatRunSummary(state));
+        await showStatusSummary(ctx, buildRunSummarySections(state));
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
       }
@@ -117,15 +135,16 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
         const repository = await repositoryRoot(ctx.cwd);
         const tokens = shellWords(args);
         const adoptCurrentHead = removeFlag(tokens, "--adopt-current-head");
+        const noFollowUps = removeFlag(tokens, "--no-follow-ups");
         const runId = tokens[0] || await latestRunId(repository);
-        if (!runId || tokens.length > 1) return ctx.ui.notify("Usage: /prompt-chain-resume <run-id> [--adopt-current-head]", "warning");
+        if (!runId || tokens.length > 1) return ctx.ui.notify("Usage: /prompt-chain-resume <run-id> [--adopt-current-head] [--no-follow-ups]", "warning");
         const requestedAt = new Date();
         ctx.ui.setStatus("prompt-chain-hybrid", `Resuming ${runId}…`);
         ctx.ui.notify(
           `Resume requested: ${requestedAt.toISOString()}\nRun: ${runId}\nProgress will appear here at each durable run or step transition. Long implementation and review attempts can take several minutes between updates.`,
           "info",
         );
-        const state = await resumeRun({
+        let state = await resumeRun({
           repositoryRoot: repository,
           runId,
           adoptCurrentHead,
@@ -134,8 +153,18 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
             ctx.ui.notify(`[${new Date().toISOString()}] ${message}${stageId ? `\nStep: ${stageId}` : ""}`, "info");
           },
         });
+        let reportText: string | undefined;
+        if (!noFollowUps) {
+          const report = await completeChainAutonomously({
+            repositoryRoot: repository,
+            state,
+            onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
+          });
+          state = report.state;
+          reportText = formatAutonomousReport(report);
+        }
         ctx.ui.setStatus("prompt-chain-hybrid", `${state.id}: ${state.status}`);
-        ctx.ui.notify(formatRunSummary(state), state.status === "completed" ? "info" : "warning");
+        ctx.ui.notify(`${formatRunSummary(state)}${reportText ? `\n\n${reportText}` : ""}`, state.status === "completed" ? "info" : "warning");
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
       }
@@ -225,7 +254,7 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("prompt-chain-supervise", {
-    description: "Run a Prompt-chain hybrid manifest under continuous supervisor until terminal state",
+    description: "Run a Prompt-chain hybrid manifest under continuous supervision until chain, follow-ups, and audit are done",
     handler: async (args, ctx) => {
       const tokens = shellWords(args);
       const humanDecisions = removeFlag(tokens, "--human-decisions");
@@ -233,27 +262,98 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
       if (!manifestPath) return ctx.ui.notify("Usage: /prompt-chain-supervise <manifest.json> [--human-decisions]", "warning");
       ctx.ui.setStatus("prompt-chain-hybrid", "Starting supervised Prompt-chain run…");
       try {
+        const onEvent = ({ message }: { message: string }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100));
         const initial = await runManifestFile({
           manifestPath: path.resolve(ctx.cwd, manifestPath),
           humanDecisions,
-          onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
+          onEvent,
         });
-        let state = initial;
-        if (state.status !== "completed" && state.status !== "failed" && state.status !== "aborted") {
-          // Derive the repository root from the manifest's workingDirectory, not ctx.cwd,
-          // so the supervisor loads state from the correct .pi directory.
-          const repository = await repositoryRoot(state.manifest.workingDirectory);
-          const supervisor = new Supervisor({
-            repositoryRoot: repository,
-            runId: state.id,
-            onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
-          });
-          state = await supervisor.start();
-        }
+        // Derive the repository root from the manifest's workingDirectory, not ctx.cwd,
+        // so the supervisor loads state from the correct .pi directory.
+        const repository = await repositoryRoot(initial.manifest.workingDirectory);
+        const report = await completeChainAutonomously({ repositoryRoot: repository, state: initial, humanDecisions, onEvent });
+        const state = report.state;
         ctx.ui.setStatus("prompt-chain-hybrid", `${state.id}: ${state.status}`);
-        ctx.ui.notify(formatRunSummary(state), state.status === "completed" ? "info" : state.status === "paused" ? "warning" : "error");
+        ctx.ui.notify(
+          `${formatRunSummary(state)}\n\n${formatAutonomousReport(report)}`,
+          state.status === "completed" ? "info" : state.status === "paused" ? "warning" : "error",
+        );
       } catch (error) {
         ctx.ui.setStatus("prompt-chain-hybrid", "Supervised run failed");
+        ctx.ui.notify(errorMessage(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("prompt-chain-follow-ups", {
+    description: "Autonomously execute the deferred follow-ups and unverified criteria of a completed run",
+    handler: async (args, ctx) => {
+      try {
+        const tokens = shellWords(args);
+        const noAudit = removeFlag(tokens, "--no-audit");
+        const rounds = takeOption(tokens, "--rounds");
+        const repository = await repositoryRoot(ctx.cwd);
+        const runId = tokens[0] || await latestRunId(repository);
+        if (!runId) return ctx.ui.notify("Usage: /prompt-chain-follow-ups [run-id] [--rounds N] [--no-audit]", "warning");
+        const state = await loadRunState(repository, runId);
+        if (state.status !== "completed") {
+          return ctx.ui.notify(`Run ${runId} is ${state.status}. Complete it first with /prompt-chain-resume ${runId}.`, "warning");
+        }
+        ctx.ui.setStatus("prompt-chain-hybrid", `Executing follow-ups for ${runId}…`);
+        const report = await runFollowUpRounds({
+          repositoryRoot: repository,
+          state,
+          maxRounds: rounds ? Number(rounds) : undefined,
+          auditCriteria: !noAudit,
+          onEvent: ({ message }) => ctx.ui.setStatus("prompt-chain-hybrid", message.slice(0, 100)),
+        });
+        ctx.ui.setStatus("prompt-chain-hybrid", `${runId}: follow-ups done`);
+        const lines = [
+          `Follow-up execution for ${runId}:`,
+          ...(report.runs.length
+            ? report.runs.map((run) => `  Round ${run.round}: ${run.runId} — ${run.status} (${run.itemCount} item(s), ${run.stageCount} step(s))`)
+            : ["  No executable deferred work was found."]),
+          `  Remaining deferred items: ${report.remainingItems}`,
+          ...report.notes.map((note) => `  Note: ${note}`),
+        ];
+        ctx.ui.notify(lines.join("\n"), report.remainingItems === 0 ? "info" : "warning");
+      } catch (error) {
+        ctx.ui.notify(errorMessage(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("prompt-chain-loop", {
+    description: "Drain the local issue backlog: claim and fully execute ready issues until none remain",
+    handler: async (args, ctx) => {
+      const tokens = shellWords(args);
+      const humanDecisions = removeFlag(tokens, "--human-decisions");
+      const maxText = takeOption(tokens, "--max");
+      const eventFile = tokens[0];
+      if (!eventFile) return ctx.ui.notify("Usage: /prompt-chain-loop <issues.jsonl> [--max N] [--human-decisions]", "warning");
+      const max = Math.max(1, Number(maxText ?? 20) || 20);
+      const messages: string[] = [];
+      try {
+        for (let processed = 0; processed < max; processed += 1) {
+          const result = await processNextIssue({
+            eventFile: path.resolve(ctx.cwd, eventFile),
+            humanDecisions,
+            onEvent: (message) => ctx.ui.setStatus("prompt-chain-hybrid-loop", message.slice(0, 100)),
+          });
+          if (!result.issue) {
+            messages.push(processed ? "Backlog drained: no ready issue remains." : "No ready issue is available.");
+            break;
+          }
+          messages.push(result.message);
+          if (result.run && result.run.status !== "completed") {
+            messages.push(`Stopping the loop: ${result.issue.id} ended ${result.run.status}.`);
+            break;
+          }
+        }
+        ctx.ui.setStatus("prompt-chain-hybrid-loop", "idle");
+        ctx.ui.notify(messages.join("\n") || "No issues were processed.", "info");
+      } catch (error) {
+        ctx.ui.setStatus("prompt-chain-hybrid-loop", "failed");
         ctx.ui.notify(errorMessage(error), "error");
       }
     },
@@ -341,6 +441,13 @@ function removeFlag(tokens: string[], flag: string): boolean {
   return true;
 }
 
+function takeOption(tokens: string[], option: string): string | undefined {
+  const index = tokens.indexOf(option);
+  if (index < 0) return undefined;
+  const [, value] = tokens.splice(index, 2);
+  return value;
+}
+
 function splitFirst(value: string): [string | undefined, string | undefined] {
   const index = value.indexOf(" ");
   return index < 0 ? [value || undefined, undefined] : [value.slice(0, index), value.slice(index + 1).trim()];
@@ -360,42 +467,102 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+interface StatusRow {
+  text: string;
+  stageIndex?: number;
+  isTitle?: boolean;
+}
+
 async function showStatusSummary(
   ctx: ExtensionCommandContext,
-  summary: string,
+  sections: RunSummarySections,
 ): Promise<void> {
-  const viewHeight = 14;
+  const viewHeight = 16;
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    // Individual steps start collapsed; only their one-line summary is shown.
+    const expanded = sections.stages.map(() => false);
+    let selected = sections.stages.length ? 0 : -1;
     let offset = 0;
     let maxOffset = 0;
+    let revealSelected = true;
+    const buildRows = (innerWidth: number): StatusRow[] => {
+      const rows: StatusRow[] = [];
+      for (const line of sections.header) {
+        for (const wrapped of wrapStatusSummary(line, innerWidth)) rows.push({ text: wrapped });
+      }
+      rows.push({ text: "" });
+      rows.push({ text: `Steps (${sections.stages.length}) — collapsed; expand for details:` });
+      sections.stages.forEach((stage, index) => {
+        const marker = expanded[index] ? "▾" : "▸";
+        for (const wrapped of wrapStatusSummary(`${marker} ${stage.title}`, innerWidth)) {
+          rows.push({ text: wrapped, stageIndex: index, isTitle: true });
+        }
+        if (expanded[index]) {
+          for (const line of stage.lines) {
+            for (const wrapped of wrapStatusSummary(line ? `    ${line}` : "", innerWidth)) {
+              rows.push({ text: wrapped, stageIndex: index });
+            }
+          }
+        }
+      });
+      return rows;
+    };
     const renderLines = (width: number): string[] => {
       const innerWidth = Math.max(1, width - 4);
-      const lines = wrapStatusSummary(summary, innerWidth);
-      maxOffset = Math.max(0, lines.length - viewHeight);
-      offset = Math.min(offset, maxOffset);
+      const rows = buildRows(innerWidth);
+      maxOffset = Math.max(0, rows.length - viewHeight);
+      if (revealSelected && selected >= 0) {
+        const titleIndex = rows.findIndex((row) => row.stageIndex === selected && row.isTitle);
+        if (titleIndex >= 0) {
+          if (titleIndex < offset) offset = titleIndex;
+          else if (titleIndex >= offset + viewHeight) offset = titleIndex - viewHeight + 1;
+        }
+        revealSelected = false;
+      }
+      offset = Math.min(Math.max(0, offset), maxOffset);
       const border = theme.fg("accent", `┌${"─".repeat(innerWidth + 2)}┐`);
       const divider = theme.fg("accent", `├${"─".repeat(innerWidth + 2)}┤`);
       const row = (text: string, style: (value: string) => string = (value) => value): string =>
         `│ ${style(text.slice(0, innerWidth).padEnd(innerWidth))} │`;
-      const visible = lines.slice(offset, offset + viewHeight);
+      const visible = rows.slice(offset, offset + viewHeight);
       return [
         border,
         row("Prompt-chain status", (value) => theme.fg("accent", theme.bold(value))),
-        row(`Lines ${offset + 1}-${Math.min(offset + viewHeight, lines.length)} of ${lines.length} · ↑/↓ or j/k scroll · enter/esc close`, (value) => theme.fg("dim", value)),
+        row(
+          `↑/↓ select step · enter/space expand · e all · c none · PgUp/PgDn scroll · esc/q close · rows ${offset + 1}-${Math.min(offset + viewHeight, rows.length)} of ${rows.length}`,
+          (value) => theme.fg("dim", value),
+        ),
         divider,
-        ...visible.map((line) => row(line)),
+        ...visible.map((entry) => entry.isTitle && entry.stageIndex === selected
+          ? row(entry.text, (value) => theme.fg("accent", theme.bold(value)))
+          : row(entry.text)),
         ...Array.from({ length: viewHeight - visible.length }, () => row("")),
         border.replace("┌", "└").replace("┐", "┘"),
       ];
+    };
+    const moveSelection = (delta: number): void => {
+      if (!sections.stages.length) return;
+      const next = Math.min(sections.stages.length - 1, Math.max(0, selected + delta));
+      if (next === selected && delta < 0) offset = 0; // moving above the first step reveals the header
+      selected = next;
+      revealSelected = true;
     };
     return {
       render: renderLines,
       invalidate: () => {},
       handleInput: (data: string) => {
-        if (data === "\u001b" || data === "\r" || data === "\n") return done();
-        if (data === "\u001b[B" || data === "j") offset = Math.min(maxOffset, offset + 1);
-        else if (data === "\u001b[A" || data === "k") offset = Math.max(0, offset - 1);
-        else if (data === " " || data === "\u001b[6~") offset = Math.min(maxOffset, offset + viewHeight);
+        if (data === "\u001b" || data === "q") return done();
+        if (data === "\u001b[B" || data === "j") moveSelection(1);
+        else if (data === "\u001b[A" || data === "k") moveSelection(-1);
+        else if ((data === "\r" || data === "\n" || data === " " || data === "l" || data === "\u001b[C") && selected >= 0) {
+          expanded[selected] = !expanded[selected];
+          revealSelected = true;
+        } else if ((data === "h" || data === "\u001b[D") && selected >= 0) {
+          expanded[selected] = false;
+          revealSelected = true;
+        } else if (data === "e") expanded.fill(true);
+        else if (data === "c") expanded.fill(false);
+        else if (data === "\u001b[6~") offset = Math.min(maxOffset, offset + viewHeight);
         else if (data === "\u001b[5~") offset = Math.max(0, offset - viewHeight);
         else if (data === "g" || data === "\u001b[H") offset = 0;
         else if (data === "G" || data === "\u001b[F") offset = maxOffset;
