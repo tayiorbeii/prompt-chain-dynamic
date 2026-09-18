@@ -6,9 +6,12 @@ node_modules/
 
 # Research artifacts
 .research/
+.research-cache/
+docs/research/
 
-# Prompt-chain runtime run state (transient, not source)
-.pi/prompt-chain-hybrid/runs/
+# Pi planning / persona-team run state (transient, contains local paths)
+.pi/
+.pi-persona/
 
 # Environment files
 .env
