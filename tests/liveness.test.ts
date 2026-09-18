@@ -134,7 +134,8 @@ test("best-effort exhaustion retains the final cumulative candidate patch", asyn
     settings: {
       autoCommit: false,
       reviewPolicy: { required: true, reviewerCount: 1, maxRepairRounds: 10, malformedVerdict: "continue", requireFreshClosureReviewer: true },
-      continuationPolicy: { consecutiveFailureOverride: 2 },
+      // This test exercises the opt-in best-effort acceptance path.
+      continuationPolicy: { consecutiveFailureOverride: 2, bestEffortCompletion: true },
     },
     stages: [
       {
@@ -207,7 +208,8 @@ test("an empty test-suite success is treated as non-validation and recorded for 
     settings: {
       autoCommit: false,
       reviewPolicy: { required: false },
-      continuationPolicy: { consecutiveFailureOverride: 1 },
+      // This test exercises the opt-in best-effort acceptance path.
+      continuationPolicy: { consecutiveFailureOverride: 1, bestEffortCompletion: true },
     },
     stages: [
       {
@@ -266,7 +268,10 @@ test("automatic follow-up remediation builds on the current worktree before reco
     settings: {
       autoCommit: false,
       reviewPolicy: { required: false },
-      continuationPolicy: { consecutiveFailureOverride: 1, autoResumeTurnLimit: 1, automaticFollowUpPasses: 1, automaticFollowUpAttemptLimit: 1 },
+      // The automatic follow-up remediation window is itself gated behind
+      // best-effort acceptance (see runner.ts): opt in explicitly so this
+      // test can exercise the bounded auto-repair-retry mechanism.
+      continuationPolicy: { consecutiveFailureOverride: 1, autoResumeTurnLimit: 1, automaticFollowUpPasses: 1, automaticFollowUpAttemptLimit: 1, bestEffortCompletion: true },
     },
     stages: [
       {

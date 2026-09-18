@@ -227,7 +227,18 @@ function buildStages(
   const implementation: TripStage[] = [];
   let previous = "research";
   for (const slice of slices) {
-    const needs = topology === "same-checkout-serial" ? [previous] : ["research"];
+    // Author-declared "**Needs**"/"**Dependencies**" labels are parsed onto
+    // slice.needs (see parseSlices) as slugs matching other slice titles.
+    // Thread them into the scheduler edges directly so the compiled DAG
+    // matches the authored plan graph instead of silently falling back to a
+    // pure document-order chain. Unmapped/typo'd slugs are passed through
+    // unresolved on purpose: validateManifest already reports "unknown
+    // dependency" for any id that doesn't match a real stage, which is a far
+    // better failure mode than silently discarding the author's intent.
+    const declaredNeeds = [...new Set(slice.needs.map((need) => `implement-${need}`))];
+    const needs = declaredNeeds.length
+      ? declaredNeeds
+      : topology === "same-checkout-serial" ? [previous] : ["research"];
     implementation.push({
       id: slice.id,
       type: "implementation",

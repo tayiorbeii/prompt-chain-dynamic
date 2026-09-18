@@ -75,7 +75,7 @@ export interface ContinuationPolicy {
   reaperPollIntervalMs?: number;
   /** Disable only when an external scheduler provides equivalent stale-lease recovery. */
   reaperEnabled?: boolean;
-  /** Accept the best safe attempt and create follow-up notes instead of pausing on exhaustion. */
+  /** Accept the best safe attempt and create follow-up notes instead of pausing on exhaustion. Defaults to false (fail closed): exhaustion pauses the run for operator review. Set true to opt into the legacy accept-and-follow-up behavior. */
   bestEffortCompletion?: boolean;
   /** Automatically open bounded remediation windows before recording unresolved work as follow-ups. Defaults to 1. */
   automaticFollowUpPasses?: number;

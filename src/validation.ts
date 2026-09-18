@@ -54,7 +54,12 @@ export function normalizeManifest(input: TripManifest): TripManifest {
         reaperEnabled: true,
         reaperPollIntervalMs: 5_000,
         heartbeatStopTimeoutMs: 5_000,
-        bestEffortCompletion: true,
+        // Fail closed by default: exhausted/unresolved review findings pause
+        // the run instead of being silently accepted as "best effort", which
+        // previously undermined the mandatory-closure guarantee. Set
+        // `continuationPolicy.bestEffortCompletion: true` explicitly to opt
+        // back into the old accept-and-follow-up behavior.
+        bestEffortCompletion: false,
         ...input.settings?.continuationPolicy,
       },
       defaultValidationCommands: input.settings?.defaultValidationCommands ?? [],

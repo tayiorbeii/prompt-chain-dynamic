@@ -45,6 +45,8 @@ test("a failed optional worker is completed best-effort so downstream work still
     settings: {
       autoCommit: false,
       reviewPolicy: { required: false },
+      // This test exercises the opt-in best-effort acceptance path.
+      continuationPolicy: { bestEffortCompletion: true },
     },
     stages: [
       { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
@@ -98,7 +100,8 @@ test("persistent worker failure is noted and does not skip downstream stages", a
     schemaVersion: 1,
     name: "Skipped downstream",
     workingDirectory: repository,
-    settings: { autoCommit: false, reviewPolicy: { required: false } },
+    // This test exercises the opt-in best-effort acceptance path.
+    settings: { autoCommit: false, reviewPolicy: { required: false }, continuationPolicy: { bestEffortCompletion: true } },
     stages: [
       { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
       {
@@ -215,7 +218,8 @@ test("consecutive non-progress records follow-up after its automatic remediation
     settings: {
       autoCommit: false,
       reviewPolicy: { required: true, reviewerCount: 1, maxRepairRounds: 10, malformedVerdict: "continue", requireFreshClosureReviewer: false },
-      continuationPolicy: { maxConsecutiveFailures: 3 },
+      // This test exercises the opt-in best-effort acceptance path.
+      continuationPolicy: { maxConsecutiveFailures: 3, bestEffortCompletion: true },
     },
     stages: [
       { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },

@@ -53,6 +53,75 @@ test("compiler serializes slices that lack an explicit parallel-safety declarati
   assert.deepEqual(writers[1]?.needs, [writers[0]?.id]);
 });
 
+test("compiler threads author-declared Needs into the compiled DAG instead of discarding them", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trip-compiler-"));
+  const plan = path.join(root, "plan.md");
+  await writeFile(plan, `# Explicit dependencies
+
+### Slice A
+**File**: \`src/a.ts\`
+
+Implement A.
+
+### Slice B
+**File**: \`src/b.ts\`
+
+**Needs**: Slice A
+
+Implement B.
+
+### Slice C
+**File**: \`src/c.ts\`
+
+**Needs**: Slice A, Slice B
+
+Implement C. Declares both prior slices explicitly, not just the immediately preceding one.
+`);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "auto" });
+  assert.equal(result.manifest.metadata?.selectedTopology, "same-checkout-serial");
+  const writers = result.manifest.stages.filter((stage) => stage.type === "implementation");
+  const byId = Object.fromEntries(writers.map((stage) => [stage.id, stage]));
+  // Before the fix, buildStages ignored slice.needs entirely and always set
+  // needs to [previousStageId] regardless of what the author declared. Assert
+  // the compiled edges match the authored "**Needs**" list verbatim, not a
+  // synthesized document-order chain.
+  assert.deepEqual(byId["implement-slice-b"]?.needs, ["implement-slice-a"]);
+  assert.deepEqual(byId["implement-slice-c"]?.needs, ["implement-slice-a", "implement-slice-b"]);
+});
+
+test("compiler surfaces an explicit validation error when declared Needs skip an intervening same-checkout writer", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trip-compiler-"));
+  const plan = path.join(root, "plan.md");
+  await writeFile(plan, `# Skipped dependency
+
+### Slice A
+**File**: \`src/a.ts\`
+
+Implement A.
+
+### Slice B
+**File**: \`src/b.ts\`
+
+Implement B, unrelated to A or C.
+
+### Slice C
+**File**: \`src/c.ts\`
+
+**Needs**: Slice A
+
+Implement C, which only declares Slice A even though Slice B runs between them in the same checkout.
+`);
+  // Before the fix this would have silently compiled a manifest whose actual
+  // edges (needs: [previous]) diverged from the authored dependency graph.
+  // After the fix, the declared edges are honored, which makes the same-checkout
+  // ordering conflict an explicit, loud validation failure instead of a silent
+  // divergence between the authored plan and the executed DAG.
+  await assert.rejects(
+    () => compilePlanFile(plan, { workingDirectory: root, mode: "auto" }),
+    /same-checkout writers must be linearly ordered/,
+  );
+});
+
 test("compiler refuses to invent a path for an unresolved slice", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trip-compiler-"));
   const plan = path.join(root, "plan.md");
