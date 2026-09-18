@@ -67,7 +67,8 @@ Implement the thing without naming any file.
 test("written manifest round-trips", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trip-compiler-"));
   const plan = path.join(root, "plan.md");
-  const output = path.join(root, "plan.trip.json");
+  const output = path.join(root, "docs", "plans", "plan.trip.json");
+  await mkdir(path.dirname(output), { recursive: true });
   await writeFile(plan, `# One slice
 
 ### Slice A
@@ -77,6 +78,8 @@ test("written manifest round-trips", async () => {
   const manifest = JSON.parse(await readFile(output, "utf8"));
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.metadata.selectedTopology, "same-checkout-serial");
+  assert.equal(manifest.workingDirectory, "../..");
+  assert.doesNotMatch(await readFile(output, "utf8"), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("compiler freezes source, policy and runtime metadata", async () => {

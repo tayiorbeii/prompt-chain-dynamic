@@ -104,7 +104,7 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
     workingDirectory,
     metadata: {
       generator: { name: "prompt-chain-plan-compiler", version: "0.1.0" },
-      sourceGuide: planPath,
+      sourceGuide: path.relative(workingDirectory, planPath),
       generatedAt: new Date().toISOString(),
       requestedMode,
       selectedTopology,
@@ -148,8 +148,17 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
   normalized = assertValidManifest(normalized);
   if (options.outputPath) {
     const outputPath = path.resolve(options.outputPath);
-    await writeFile(outputPath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
-    return { manifest: normalized, outputPath, warnings };
+    const portable: TripManifest = {
+      ...normalized,
+      workingDirectory: path.relative(path.dirname(outputPath), workingDirectory) || ".",
+      metadata: { ...normalized.metadata },
+    };
+    if (portable.metadata) {
+      delete portable.metadata.contractHash;
+      portable.metadata.contractHash = digest(JSON.stringify(portable));
+    }
+    await writeFile(outputPath, `${JSON.stringify(portable, null, 2)}\n`, "utf8");
+    return { manifest: portable, outputPath, warnings };
   }
   return { manifest: normalized, warnings };
 }

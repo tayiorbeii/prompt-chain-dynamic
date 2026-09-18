@@ -1,3 +1,4 @@
+import type { Keybinding } from "@earendil-works/pi-tui";
 import type { AttemptRecord, Finding, RunState, StageRunState, TripStage, ValidationResult } from "./types.ts";
 
 const STATUS_ICON: Record<StageRunState["status"], string> = {
@@ -12,6 +13,49 @@ const STATUS_ICON: Record<StageRunState["status"], string> = {
 export interface RunSummarySections {
   header: string[];
   stages: Array<{ id: string; title: string; lines: string[] }>;
+}
+
+export type StatusInputAction =
+  | "close"
+  | "up"
+  | "down"
+  | "pageUp"
+  | "pageDown"
+  | "confirm"
+  | "space"
+  | "left"
+  | "right"
+  | "next"
+  | "previous"
+  | "expandAll"
+  | "collapseAll"
+  | "top"
+  | "bottom"
+  | "follow"
+  | "refresh";
+
+export function resolveStatusInput(
+  data: string,
+  matches: (data: string, keybinding: Keybinding) => boolean,
+): StatusInputAction | undefined {
+  if (matches(data, "tui.select.cancel") || data === "q") return "close";
+  if (data === "j") return "next";
+  if (data === "k") return "previous";
+  if (matches(data, "tui.select.up")) return "up";
+  if (matches(data, "tui.select.down")) return "down";
+  if (matches(data, "tui.select.pageUp")) return "pageUp";
+  if (matches(data, "tui.select.pageDown")) return "pageDown";
+  if (matches(data, "tui.select.confirm")) return "confirm";
+  if (data === " ") return "space";
+  if (matches(data, "tui.editor.cursorLeft") || data === "h") return "left";
+  if (matches(data, "tui.editor.cursorRight") || data === "l") return "right";
+  if (data === "e") return "expandAll";
+  if (data === "c") return "collapseAll";
+  if (data === "g") return "top";
+  if (data === "G") return "bottom";
+  if (data === "f") return "follow";
+  if (data === "r") return "refresh";
+  return undefined;
 }
 
 export function buildRunSummarySections(state: RunState, requestedAt = new Date()): RunSummarySections {

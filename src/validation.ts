@@ -1,4 +1,3 @@
-import path from "node:path";
 import {
   assertPathCovered,
   isConcretePath,
@@ -32,7 +31,7 @@ export function normalizeManifest(input: TripManifest): TripManifest {
   const inferredStrategy = writerIsolation.has("worktree") ? "worktree-fan-in" : "same-checkout-finalize";
   return {
     ...input,
-    workingDirectory: path.resolve(input.workingDirectory),
+    workingDirectory: input.workingDirectory.trim(),
     settings: {
       ...DEFAULT_SETTINGS,
       ...input.settings,
@@ -83,7 +82,9 @@ export function validateManifest(input: TripManifest): ManifestValidationResult 
     issue(issues, "schemaVersion", "only schemaVersion 1 is supported");
   }
   if (!manifest.name.trim()) issue(issues, "name", "name is required");
-  if (!path.isAbsolute(manifest.workingDirectory)) issue(issues, "workingDirectory", "workingDirectory must resolve to an absolute path");
+  if (!manifest.workingDirectory || manifest.workingDirectory.includes("\0")) {
+    issue(issues, "workingDirectory", "workingDirectory must be a non-empty absolute path or a portable path relative to the manifest file");
+  }
   if (!manifest.stages.length) issue(issues, "stages", "at least one stage is required");
 
   const ids = new Set<string>();

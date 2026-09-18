@@ -37,7 +37,13 @@ export class RunReaper {
         await sleep(pollIntervalMs);
         continue;
       }
-      if (state.status === "paused" && state.manifest.settings?.continuationPolicy?.bestEffortCompletion === false) {
+      if (state.status === "paused" && (
+        state.pauseKind === "workspace_drift"
+        || state.pauseKind === "review_blocked"
+        || state.manifest.settings?.continuationPolicy?.bestEffortCompletion === false
+      )) {
+        // Workspace cleanup and missing release evidence require operator action.
+        // Do not repeatedly resume a stage that cannot make safe autonomous progress.
         return state;
       }
       try {

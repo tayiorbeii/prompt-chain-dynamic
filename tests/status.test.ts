@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRunSummarySections, formatRunSummary } from "../src/status.ts";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import { buildRunSummarySections, formatRunSummary, resolveStatusInput } from "../src/status.ts";
 import type { NormalizedReview, RunState } from "../src/types.ts";
 
 const completeReview: NormalizedReview = {
@@ -208,6 +209,19 @@ test("aborted runs render a stale running stage as interrupted and stop elapsed 
   assert.match(output, /! writer — interrupted by abort \(recorded: running\)/);
   assert.match(output, /Elapsed since start: 9m/);
   assert.match(output, /Lease: generation 2 .* inactive \(aborted\)/);
+});
+
+test("status input uses Pi keybindings for arrows, escape, paging, and confirm", () => {
+  const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
+  const matches = (data: string, keybinding: string) =>
+    keybindings.matches(data, keybinding as Parameters<typeof keybindings.matches>[1]);
+
+  assert.equal(resolveStatusInput("\x1bOA", matches), "up");
+  assert.equal(resolveStatusInput("\x1bOB", matches), "down");
+  assert.equal(resolveStatusInput("\x1b", matches), "close");
+  assert.equal(resolveStatusInput("\r", matches), "confirm");
+  assert.equal(resolveStatusInput("\x1b[5~", matches), "pageUp");
+  assert.equal(resolveStatusInput("\x1b[6~", matches), "pageDown");
 });
 
 test("buildRunSummarySections produces collapsible per-step sections consistent with the flat summary", () => {

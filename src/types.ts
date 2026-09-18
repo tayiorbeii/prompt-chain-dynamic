@@ -337,6 +337,8 @@ export interface RunState {
   manifest: TripManifest;
   status: RunStatus;
   baseRevision: string;
+  /** Immutable states of paths that were already dirty when the run began. */
+  workspaceBaseline?: Record<string, string>;
   decisionMode: DecisionMode;
   createdAt: string;
   updatedAt: string;

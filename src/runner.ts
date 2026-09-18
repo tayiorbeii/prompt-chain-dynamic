@@ -129,7 +129,13 @@ class LeaseSuperseded extends Error {}
 
 export async function runManifestFile(options: RunOptions): Promise<RunState> {
   const manifestPath = path.resolve(options.manifestPath);
-  const manifest = assertValidManifest(JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest);
+  const sourceManifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
+  const manifest = assertValidManifest({
+    ...sourceManifest,
+    workingDirectory: path.isAbsolute(sourceManifest.workingDirectory)
+      ? sourceManifest.workingDirectory
+      : path.resolve(path.dirname(manifestPath), sourceManifest.workingDirectory),
+  });
   await ensureGitRepository(manifest.workingDirectory);
   const repository = await repositoryRoot(manifest.workingDirectory);
   const resolvedWorkingDirectory = await realpath(manifest.workingDirectory);
@@ -137,7 +143,16 @@ export async function runManifestFile(options: RunOptions): Promise<RunState> {
   if (packageRelative === ".." || packageRelative.startsWith(`..${path.sep}`)) {
     throw new Error(`workingDirectory must be inside its Git repository: ${manifest.workingDirectory}`);
   }
-  await assertCleanCheckout(repository);
+  const workspaceBaseline = await snapshotChangedPathStates(repository);
+  const writerAllowed = manifest.stages
+    .filter((stage) => stage.type !== "review")
+    .flatMap((stage) => (stage.allowedPaths ?? []).map((value) => withPackagePrefix(packageRelative, value)));
+  const ambiguousDirtyPaths = Object.keys(workspaceBaseline).filter((value) =>
+    !isIgnorableDirtyPath(value)
+    && writerAllowed.some((pattern) => assertPathCovered(value, [pattern])));
+  if (ambiguousDirtyPaths.length) {
+    throw new Error(`writer execution cannot safely attribute pre-existing changes inside a writer path contract; commit, stash, or move these paths before starting:\n${ambiguousDirtyPaths.map((value) => `- ${value}`).join("\n")}`);
+  }
   const baseRevision = await currentHead(repository);
   const now = new Date().toISOString();
   const id = `trip-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
@@ -151,6 +166,7 @@ export async function runManifestFile(options: RunOptions): Promise<RunState> {
     // initial worker for a merely-pending run.
     status: "running",
     baseRevision,
+    workspaceBaseline,
     decisionMode: options.humanDecisions ? "human" : manifest.settings?.decisionPolicy?.mode ?? "agent",
     createdAt: now,
     updatedAt: now,
@@ -216,9 +232,16 @@ export async function resumeRun(options: ResumeOptions): Promise<RunState> {
     await reconcileInterruptedStages(repository, state, claim.previousStatus === "failed", options.adoptCurrentHead === true);
   } catch (error) {
     if (!isSafetyBoundaryError(error)) throw error;
-    state.status = "failed";
     state.pauseKind = "workspace_drift";
     state.pauseReason = errorMessage(error);
+    if (isRecoverableWorkspaceDriftError(error)) {
+      state.status = "paused";
+      state.completedAt = undefined;
+      await writeRunState(repository, state);
+      await appendRunEvent(repository, state.id, { type: "run.paused", message: state.pauseReason });
+      return state;
+    }
+    state.status = "failed";
     state.completedAt = new Date().toISOString();
     await writeRunState(repository, state);
     await appendRunEvent(repository, state.id, { type: "run.failed", message: state.pauseReason });
@@ -532,11 +555,17 @@ async function runWriterStage(
   const maxConsecutiveFailures = continuationPolicy?.consecutiveFailureOverride
     ?? continuationPolicy?.maxConsecutiveFailures
     ?? 5;
-  let maximumTotalAttempts = continuationPolicy?.autoResumeTurnLimit
+  const configuredAttemptLimit = continuationPolicy?.autoResumeTurnLimit
     ?? continuationPolicy?.maxTurns
     ?? 30;
   const automaticFollowUpPasses = continuationPolicy?.automaticFollowUpPasses ?? 1;
   const automaticFollowUpAttemptLimit = continuationPolicy?.automaticFollowUpAttemptLimit ?? 5;
+  // A manually resumed paused stage receives a fresh bounded repair window rather
+  // than immediately re-hitting its historical lifetime attempt count.
+  let maximumTotalAttempts = Math.max(
+    configuredAttemptLimit,
+    attemptNum > 0 ? attemptNum + automaticFollowUpAttemptLimit : configuredAttemptLimit,
+  );
   let automaticFollowUpPass = 0;
   // maxRepairRounds is a focused-strategy window, not a terminal attempt cap.
   // Semantic work continues automatically while validation/review keeps making
@@ -569,6 +598,13 @@ async function runWriterStage(
         await emit(context, "stage.follow_up.automatic_started", `Stage ${stage.id} started automatic follow-up remediation pass ${automaticFollowUpPass}/${automaticFollowUpPasses}`, stage.id);
         await writeRunState(context.repositoryRoot, context.state);
         continue;
+      }
+      if (integration && stage.required !== false) {
+        throw new PauseRun(
+          "review_blocked",
+          stage.id,
+          `${reason} Required integration remains unverified. The run is paused without committing so the blocking evidence can be fixed, then resumed for another bounded repair window.`,
+        );
       }
       if (continuationPolicy?.bestEffortCompletion === false) {
         throw new PauseRun("review_blocked", stage.id, `${reason} Automatic remediation is disabled by bestEffortCompletion=false.`);
@@ -631,11 +667,13 @@ async function runWriterStage(
     if (headAfter !== headBefore) throw new Error(`agent created a direct commit in ${stage.id}; the runtime is the only commit authority`);
     const attemptDelta = await calculateStageDelta(gitRoot, beforeAttempt);
     enforcePathContract(context, stage, attemptDelta.changedDuring);
+    const cumulativeAttemptDelta = await calculateStageDelta(gitRoot, stageStart);
+    const candidatePatchPaths = patchPathsForStage(context, stage, cumulativeAttemptDelta.changedDuring);
 
     const workerReview = normalizeReview(result.text);
     if (workerReview.status !== "complete") {
       const direction = await handleNonCompleteVerdict(context, stage, stageState, workerReview, "worker", agentCwd);
-      const candidatePatch = await captureBinaryPatch(gitRoot);
+      const candidatePatch = await captureBinaryPatch(gitRoot, candidatePatchPaths);
       const diffHash = sha256(candidatePatch);
       const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
       const discardRecord: AttemptRecord = {
@@ -673,7 +711,7 @@ async function runWriterStage(
     if (!validationPassed(validation)) {
       const finding = validationFinding(context, stage, stageState, validation);
       await addFinding(context, finding);
-      const candidatePatch = await captureBinaryPatch(gitRoot);
+      const candidatePatch = await captureBinaryPatch(gitRoot, candidatePatchPaths);
       const diffHash = sha256(candidatePatch);
       const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
       const checksFailedRecord: AttemptRecord = {
@@ -724,9 +762,9 @@ async function runWriterStage(
     if (synthesis.status === "complete" && !synthesis.findings.some((finding) => finding.blocking)) {
       const finalDelta = await calculateStageDelta(gitRoot, stageStart);
       enforcePathContract(context, stage, finalDelta.changedDuring);
-      stageState.changedPaths = finalDelta.changedDuring;
+      stageState.changedPaths = unique([...stageState.changedPaths, ...finalDelta.changedDuring]);
       // Capture the patch once; reuse for diffHash and for the artifact in persistWriterBoundary.
-      const verifiedPatch = await captureBinaryPatch(gitRoot);
+      const verifiedPatch = await captureBinaryPatch(gitRoot, patchPathsForStage(context, stage, finalDelta.changedDuring));
       const diffHash = sha256(verifiedPatch);
       const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, verifiedPatch);
       const keepRecord: AttemptRecord = {
@@ -766,7 +804,7 @@ async function runWriterStage(
     }
 
     const direction = await handleNonCompleteVerdict(context, stage, stageState, synthesis, integration ? "integration-review" : "independent-review", agentCwd);
-    const candidatePatch = await captureBinaryPatch(gitRoot);
+    const candidatePatch = await captureBinaryPatch(gitRoot, candidatePatchPaths);
     const diffHash = sha256(candidatePatch);
     const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
     const reviewDiscardRecord: AttemptRecord = {
@@ -814,8 +852,19 @@ async function runIntegrationStage(context: RunnerContext, stage: TripStage, sta
   }
 
   await runWriterStage(context, stage, stageState, true);
-  const finalPaths = (await changedPaths(context.repositoryRoot))
-    .filter((value) => !isRuntimePath(value))
+  const workspaceDelta = await currentWorkspaceDeltaPaths(context.repositoryRoot, context.state);
+  const runOwned = new Set(runOwnedPaths(context.state));
+  const unowned = workspaceDelta.filter((value) =>
+    !runOwned.has(value) && !isStrayIgnorablePath(context, stage, value));
+  if (unowned.length) {
+    throw new PauseRun(
+      "workspace_drift",
+      stage.id,
+      `Integration found workspace changes that no stage owns. Preserve or move them outside the checkout, then resume:\n${unowned.map((value) => `- ${value}`).join("\n")}`,
+    );
+  }
+  const finalPaths = workspaceDelta
+    .filter((value) => runOwned.has(value))
     .filter((value) => !isStrayIgnorablePath(context, stage, value));
   enforcePathContract(context, stage, finalPaths);
   const journalPath = path.join(runRoot(context.repositoryRoot, context.state.id), "integration", "journal.json");
@@ -1094,7 +1143,37 @@ function enforcePathContract(context: RunnerContext, stage: TripStage, repositor
     !isRuntimePath(value)
     && !isStrayIgnorablePath(context, stage, value)
     && !allowed.some((pattern) => assertPathCovered(value, [pattern])));
-  if (violations.length) throw new Error(`stage ${stage.id} wrote outside its allowed path contract:\n${violations.map((value) => `- ${value}`).join("\n")}`);
+  if (violations.length) {
+    throw new PauseRun(
+      "workspace_drift",
+      stage.id,
+      `Stage ${stage.id} changed paths outside its allowed path contract. The run is paused without committing; preserve or move these paths, then resume:\n${violations.map((value) => `- ${value}`).join("\n")}`,
+    );
+  }
+}
+
+async function currentWorkspaceDeltaPaths(repository: string, state: RunState): Promise<string[]> {
+  const current = await snapshotChangedPathStates(repository);
+  if (!state.workspaceBaseline) {
+    return Object.keys(current).filter((value) => !isIgnorableDirtyPath(value)).sort();
+  }
+  return Object.entries(current)
+    .filter(([value, currentState]) => state.workspaceBaseline?.[value] !== currentState)
+    .map(([value]) => value)
+    .sort();
+}
+
+function runOwnedPaths(state: RunState): string[] {
+  return unique(Object.values(state.stageStates).flatMap((value) => value.changedPaths));
+}
+
+function patchPathsForStage(context: RunnerContext, stage: TripStage, stageDelta: string[]): string[] {
+  const allowed = (stage.allowedPaths ?? []).map((value) => withPackagePrefix(context.packageRelative, value));
+  const currentStagePaths = stageDelta.filter((value) =>
+    allowed.some((pattern) => assertPathCovered(value, [pattern])));
+  return stage.isolation === "worktree"
+    ? unique(currentStagePaths)
+    : unique([...runOwnedPaths(context.state), ...currentStagePaths]);
 }
 
 // A stray plan/manifest artifact (a NON-high-risk .md/.json) that a stage touches
@@ -1519,8 +1598,11 @@ async function reconcileInterruptedStages(
     return status === "running" || status === "paused" || (recoverFailed && (status === "failed" || status === "skipped"));
   });
   const interruptedSameCheckout = interrupted.filter((stage) => stage.isolation === "same-checkout");
+  let sameCheckoutDelta: string[] = [];
   if (interruptedSameCheckout.length) {
-    const currentPaths = (await changedPaths(repository)).filter((value) => !isRuntimePath(value) && !isIgnorableDirtyPath(value));
+    const currentPaths = (await currentWorkspaceDeltaPaths(repository, state))
+      .filter((value) => !isIgnorableDirtyPath(value));
+    sameCheckoutDelta = currentPaths;
     const authorizedStages = state.manifest.stages.filter((stage) => {
       const status = state.stageStates[stage.id]?.status;
       return stage.isolation === "same-checkout"
@@ -1535,7 +1617,7 @@ async function reconcileInterruptedStages(
       .filter((entry) => entry.stage.isolation === "same-checkout" && entry.stage.type === "implementation" && entry.state?.status === "completed" && entry.state.cumulativePatchSha256)
       .sort((a, b) => b.index - a.index)[0];
     if (completed?.state?.cumulativePatchSha256) {
-      const currentPatch = await captureBinaryPatch(repository);
+      const currentPatch = await captureBinaryPatch(repository, runOwnedPaths(state));
       if (sha256(currentPatch) !== completed.state.cumulativePatchSha256) {
         throw new Error(`same-checkout workspace drift detected after ${completed.stage.id}`);
       }
@@ -1545,6 +1627,13 @@ async function reconcileInterruptedStages(
   for (const stage of interrupted) {
     const stageState = state.stageStates[stage.id];
     if (!stageState) continue;
+    if (stage.isolation === "same-checkout" && sameCheckoutDelta.length) {
+      const allowed = (stage.allowedPaths ?? []).map((pattern) => withPackagePrefix(path.relative(repository, state.manifest.workingDirectory), pattern));
+      stageState.changedPaths = unique([
+        ...stageState.changedPaths,
+        ...sameCheckoutDelta.filter((value) => allowed.some((pattern) => assertPathCovered(value, [pattern]))),
+      ]);
+    }
     if (stageState.worktreePath) {
       const paths = (await changedPaths(stageState.worktreePath)).filter((value) => !isRuntimePath(value) && !isIgnorableDirtyPath(value));
       const allowed = stage.allowedPaths ?? [];
@@ -1730,10 +1819,10 @@ async function completeWriterBestEffort(
   // Each repair works on the same worktree. Preserve its final cumulative state
   // at exhaustion rather than resetting it to a previously ranked candidate.
   const retainedAttempt = stageState.attempts.at(-1);
-  const retainedPatch = await captureBinaryPatch(gitRoot);
   const finalDelta = await calculateStageDelta(gitRoot, stageStart);
   enforcePathContract(context, stage, finalDelta.changedDuring);
-  stageState.changedPaths = finalDelta.changedDuring;
+  stageState.changedPaths = unique([...stageState.changedPaths, ...finalDelta.changedDuring]);
+  const retainedPatch = await captureBinaryPatch(gitRoot, patchPathsForStage(context, stage, finalDelta.changedDuring));
   stageState.completionMode = "best-effort";
   stageState.bestAttempt = retainedAttempt?.attempt;
   await appendRunEvent(context.repositoryRoot, context.state.id, {
@@ -1866,6 +1955,10 @@ async function writeRunFollowUpSummary(context: RunnerContext): Promise<void> {
     ]),
   ].join("\n");
   await writeArtifact(context.repositoryRoot, context.state.id, "follow-ups.md", `${markdown.trim()}\n`);
+}
+
+function isRecoverableWorkspaceDriftError(error: unknown): boolean {
+  return /out-of-scope paths|workspace drift detected|workspace changes that no stage owns/i.test(errorMessage(error));
 }
 
 function isSafetyBoundaryError(error: unknown): boolean {

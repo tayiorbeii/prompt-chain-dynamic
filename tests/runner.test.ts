@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -466,4 +466,129 @@ test("a stray non-high-risk .md written outside the contract does not fail the w
   assert.match(names, /src\/feature\.ts/);
   assert.doesNotMatch(names, /plans\/scratch\.md/); // stray doc is never committed
   assert.equal(await readFile(path.join(repository, "plans", "scratch.md"), "utf8"), "# stray scratch\n"); // left ignored in the tree
+});
+
+class ScopeViolationBackend implements AgentBackend {
+  implementationCalls = 0;
+
+  async run(request: AgentRequest): Promise<AgentResult> {
+    if (request.role === "research") return result("Context gathered.");
+    if (request.stageId === "implement" && request.role === "implementation") {
+      this.implementationCalls += 1;
+      await mkdir(path.join(request.cwd, "src"), { recursive: true });
+      await writeFile(path.join(request.cwd, "src", "feature.ts"), `export const version = ${this.implementationCalls};\n`);
+      if (this.implementationCalls === 1) {
+        await mkdir(path.join(request.cwd, "tests", "security"), { recursive: true });
+        await writeFile(path.join(request.cwd, "tests", "security", "privacy-policy.test.ts"), "placeholder\n");
+      }
+      return result("<status>complete</status><risk>low</risk><rationale>Implemented.</rationale>");
+    }
+    if (request.stageId === "implement" && request.role === "review") {
+      return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+    }
+    if (request.stageId === "integrate") {
+      return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+    }
+    throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+  }
+}
+
+function sourceBoundaryManifest(repository: string, autoCommit = true): TripManifest {
+  return {
+    schemaVersion: 1,
+    name: "Source boundary recovery",
+    workingDirectory: repository,
+    settings: {
+      autoCommit,
+      reviewPolicy: { required: true, reviewerCount: 1, maxRepairRounds: 2, malformedVerdict: "continue", requireFreshClosureReviewer: true },
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      { id: "implement", type: "implementation", needs: ["research"], isolation: "same-checkout", prompt: "Implement", allowedPaths: ["src/**"], claimedPaths: ["src/feature.ts"] },
+      { id: "integrate", type: "integration", needs: ["implement"], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate", allowedPaths: ["src/**"] },
+    ],
+  };
+}
+
+test("portable manifests resolve workingDirectory relative to the manifest file", async () => {
+  const repository = await createRepository();
+  const manifest = sourceBoundaryManifest(repository, false);
+  manifest.workingDirectory = "../..";
+  const manifestPath = path.join(repository, "docs", "plans", "portable.trip.json");
+  await mkdir(path.dirname(manifestPath), { recursive: true });
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  const state = await runManifestFile({ manifestPath, backend: new SimpleCheckoutBackend(), externalReaper: false });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(state.manifest.workingDirectory, repository);
+});
+
+test("pre-existing out-of-contract source files are baselined, preserved, and never committed", async () => {
+  const repository = await createRepository();
+  const stray = path.join(repository, "tests", "security", "privacy-policy.test.ts");
+  await mkdir(path.dirname(stray), { recursive: true });
+  await writeFile(stray, "pre-existing placeholder\n");
+  const manifestPath = path.join(os.tmpdir(), `trip-baseline-source-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(sourceBoundaryManifest(repository)));
+
+  const state = await runManifestFile({ manifestPath, backend: new SimpleCheckoutBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.match(state.workspaceBaseline?.["tests/security/privacy-policy.test.ts"] ?? "", /^file:/);
+  assert.equal(await readFile(stray, "utf8"), "pre-existing placeholder\n");
+  const patch = await readFile(state.stageStates.implement?.cumulativePatchPath ?? "", "utf8");
+  assert.doesNotMatch(patch, /pre-existing placeholder|privacy-policy/);
+  const committed = await git(repository, ["show", "--pretty=format:", "--name-only", state.resultCommit!]);
+  assert.match(committed, /src\/feature\.ts/);
+  assert.doesNotMatch(committed, /privacy-policy/);
+});
+
+test("new out-of-contract source writes pause safely and can resume after operator cleanup", async () => {
+  const repository = await createRepository();
+  const manifestPath = path.join(os.tmpdir(), `trip-scope-pause-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(sourceBoundaryManifest(repository, false)));
+  const backend = new ScopeViolationBackend();
+
+  const paused = await runManifestFile({ manifestPath, backend, externalReaper: false });
+  assert.equal(paused.status, "paused");
+  assert.equal(paused.pauseKind, "workspace_drift");
+  assert.match(paused.pauseReason ?? "", /privacy-policy\.test\.ts/);
+
+  await rm(path.join(repository, "tests", "security", "privacy-policy.test.ts"));
+  const { resumeRun } = await import("../src/runner.ts");
+  const resumed = await resumeRun({ repositoryRoot: repository, runId: paused.id, backend, externalReaper: false });
+  assert.equal(resumed.status, "completed", resumed.pauseReason);
+  assert.equal(await readFile(path.join(repository, "src", "feature.ts"), "utf8"), "export const version = 2;\n");
+});
+
+class BlockedIntegrationBackend implements AgentBackend {
+  async run(request: AgentRequest): Promise<AgentResult> {
+    if (request.role === "research") return result("Context gathered.");
+    if (request.stageId === "implement" && request.role !== "review") {
+      await mkdir(path.join(request.cwd, "src"), { recursive: true });
+      await writeFile(path.join(request.cwd, "src", "feature.ts"), "export const feature = true;\n");
+      return result("<status>complete</status><risk>low</risk><rationale>Implemented.</rationale>");
+    }
+    if (request.stageId === "integrate" && request.role === "review") {
+      return result("<status>continue</status><risk>high</risk><rationale>Release evidence is unavailable.</rationale><finding><severity>critical</severity><blocking>true</blocking><summary>Mandatory release evidence is unavailable</summary><evidence>release manifest has unavailable gates</evidence><remediation>Provide the mandatory evidence.</remediation></finding>");
+    }
+    return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+  }
+}
+
+test("required integration pauses instead of committing best-effort work with blockers", async () => {
+  const repository = await createRepository();
+  const manifest = sourceBoundaryManifest(repository);
+  manifest.settings = {
+    ...manifest.settings,
+    continuationPolicy: { autoResumeTurnLimit: 1, automaticFollowUpPasses: 0 },
+  };
+  const manifestPath = path.join(os.tmpdir(), `trip-integration-blocked-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  const state = await runManifestFile({ manifestPath, backend: new BlockedIntegrationBackend(), externalReaper: false });
+  assert.equal(state.status, "paused");
+  assert.equal(state.pauseKind, "review_blocked");
+  assert.equal(state.stageStates.integrate?.status, "paused");
+  assert.equal(state.resultCommit, undefined);
+  assert.ok(state.findings.some((finding) => finding.stageId === "integrate" && finding.blocking && finding.disposition === "open"));
 });

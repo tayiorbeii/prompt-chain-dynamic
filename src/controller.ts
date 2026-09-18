@@ -55,7 +55,10 @@ export async function processNextIssue(options: ProcessIssueOptions): Promise<Pr
     : path.resolve(path.dirname(eventFile), issue.manifestPath);
   await options.onEvent?.(`Claimed ${issue.id}: ${issue.title}`);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
-  const repository = await repositoryRoot(manifest.workingDirectory);
+  const workingDirectory = path.isAbsolute(manifest.workingDirectory)
+    ? manifest.workingDirectory
+    : path.resolve(path.dirname(manifestPath), manifest.workingDirectory);
+  const repository = await repositoryRoot(workingDirectory);
   const forward = async ({ message }: { message: string }): Promise<void> => await options.onEvent?.(`${issue.id}: ${message}`);
   let run = await runManifestFile({
     manifestPath,
@@ -149,7 +152,10 @@ export async function resumeIssue(
     ? issue.manifestPath
     : path.resolve(path.dirname(eventFile), issue.manifestPath);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
-  const repository = await repositoryRoot(manifest.workingDirectory);
+  const workingDirectory = path.isAbsolute(manifest.workingDirectory)
+    ? manifest.workingDirectory
+    : path.resolve(path.dirname(manifestPath), manifest.workingDirectory);
+  const repository = await repositoryRoot(workingDirectory);
   const forward = async ({ message }: { message: string }): Promise<void> => await options.onEvent?.(`${issue.id}: ${message}`);
   let run = await resumeRun({
     repositoryRoot: repository,

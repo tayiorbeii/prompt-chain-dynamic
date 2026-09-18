@@ -10,7 +10,12 @@ import { recordHumanDecision, requestAbort, resumeRun, runManifestFile } from ".
 import { auditCompletion } from "./audit.ts";
 import { loadRunState } from "./store.ts";
 import { readRunEvents, formatRunEventsNewestFirst } from "./logs.ts";
-import { buildRunSummarySections, formatRunSummary, type RunSummarySections } from "./status.ts";
+import {
+  buildRunSummarySections,
+  formatRunSummary,
+  resolveStatusInput,
+  type RunSummarySections,
+} from "./status.ts";
 import {
   completeChainAutonomously,
   formatAutonomousReport,
@@ -478,7 +483,7 @@ async function showStatusSummary(
   sections: RunSummarySections,
 ): Promise<void> {
   const viewHeight = 16;
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+  await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
     // Individual steps start collapsed; only their one-line summary is shown.
     const expanded = sections.stages.map(() => false);
     let selected = sections.stages.length ? 0 : -1;
@@ -529,7 +534,7 @@ async function showStatusSummary(
         border,
         row("Prompt-chain status", (value) => theme.fg("accent", theme.bold(value))),
         row(
-          `↑/↓ select step · enter/space expand · e all · c none · PgUp/PgDn scroll · esc/q close · rows ${offset + 1}-${Math.min(offset + viewHeight, rows.length)} of ${rows.length}`,
+          `↑/↓ scroll expanded step or select · j/k select · enter/space expand · e all · c none · PgUp/PgDn scroll · esc/q close · rows ${offset + 1}-${Math.min(offset + viewHeight, rows.length)} of ${rows.length}`,
           (value) => theme.fg("dim", value),
         ),
         divider,
@@ -547,25 +552,41 @@ async function showStatusSummary(
       selected = next;
       revealSelected = true;
     };
+    const scrollBy = (delta: number): void => {
+      offset = Math.min(maxOffset, Math.max(0, offset + delta));
+      revealSelected = false;
+    };
     return {
       render: renderLines,
       invalidate: () => {},
       handleInput: (data: string) => {
-        if (data === "\u001b" || data === "q") return done();
-        if (data === "\u001b[B" || data === "j") moveSelection(1);
-        else if (data === "\u001b[A" || data === "k") moveSelection(-1);
-        else if ((data === "\r" || data === "\n" || data === " " || data === "l" || data === "\u001b[C") && selected >= 0) {
-          expanded[selected] = !expanded[selected];
-          revealSelected = true;
-        } else if ((data === "h" || data === "\u001b[D") && selected >= 0) {
-          expanded[selected] = false;
-          revealSelected = true;
-        } else if (data === "e") expanded.fill(true);
-        else if (data === "c") expanded.fill(false);
-        else if (data === "\u001b[6~") offset = Math.min(maxOffset, offset + viewHeight);
-        else if (data === "\u001b[5~") offset = Math.max(0, offset - viewHeight);
-        else if (data === "g" || data === "\u001b[H") offset = 0;
-        else if (data === "G" || data === "\u001b[F") offset = maxOffset;
+        const action = resolveStatusInput(data, (value, keybinding) => keybindings.matches(value, keybinding));
+        if (!action) return;
+        if (action === "close") return done();
+        if (action === "next") moveSelection(1);
+        else if (action === "previous") moveSelection(-1);
+        else if (action === "down") {
+          if (selected >= 0 && expanded[selected]) scrollBy(1);
+          else moveSelection(1);
+        } else if (action === "up") {
+          if (selected >= 0 && expanded[selected]) scrollBy(-1);
+          else moveSelection(-1);
+        } else if (action === "confirm" || action === "space" || action === "right") {
+          if (selected >= 0) {
+            expanded[selected] = !expanded[selected];
+            revealSelected = true;
+          }
+        } else if (action === "left") {
+          if (selected >= 0) {
+            expanded[selected] = false;
+            revealSelected = true;
+          }
+        } else if (action === "expandAll") expanded.fill(true);
+        else if (action === "collapseAll") expanded.fill(false);
+        else if (action === "pageDown") scrollBy(viewHeight);
+        else if (action === "pageUp") scrollBy(-viewHeight);
+        else if (action === "top") scrollBy(-maxOffset);
+        else if (action === "bottom") scrollBy(maxOffset);
         else return;
         tui.requestRender();
       },
@@ -582,7 +603,7 @@ async function showRunLogWatcher(
   runId: string,
 ): Promise<void> {
   const viewHeight = 14;
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+  await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
     let lines = ["Loading durable run events…"];
     let offset = 0;
     let maxOffset = 0;
@@ -631,23 +652,24 @@ async function showRunLogWatcher(
       render: renderLines,
       invalidate: () => {},
       handleInput: (data: string) => {
-        if (data === "\u001b" || data === "\r" || data === "\n") return close();
-        if (data === "\u001b[B" || data === "j") {
+        const action = resolveStatusInput(data, (value, keybinding) => keybindings.matches(value, keybinding));
+        if (!action || action === "close" || action === "confirm") return close();
+        if (action === "down" || action === "next") {
           offset = Math.min(maxOffset, offset + 1);
           follow = false;
-        } else if (data === "\u001b[A" || data === "k") {
+        } else if (action === "up" || action === "previous") {
           offset = Math.max(0, offset - 1);
           follow = offset === 0;
-        } else if (data === " " || data === "\u001b[6~") {
+        } else if (action === "space" || action === "pageDown") {
           offset = Math.min(maxOffset, offset + viewHeight);
           follow = false;
-        } else if (data === "\u001b[5~") {
+        } else if (action === "pageUp") {
           offset = Math.max(0, offset - viewHeight);
           follow = offset === 0;
-        } else if (data === "f") {
+        } else if (action === "follow") {
           follow = true;
           offset = 0;
-        } else if (data === "r") {
+        } else if (action === "refresh") {
           void refresh();
         } else return;
         tui.requestRender();

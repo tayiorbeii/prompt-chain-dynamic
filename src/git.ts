@@ -159,11 +159,17 @@ export async function calculateStageDelta(
   return { changedDuring: changedDuring.sort(), after };
 }
 
-export async function captureBinaryPatch(cwd: string): Promise<Buffer> {
+export async function captureBinaryPatch(cwd: string, includedPaths?: string[]): Promise<Buffer> {
+  const selected = includedPaths ? new Set(includedPaths) : undefined;
+  if (selected?.size === 0) return Buffer.alloc(0);
   const untracked = await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  const files = untracked.split("\0").filter(Boolean).filter((value) => !isRuntimePath(value));
+  const files = untracked.split("\0")
+    .filter(Boolean)
+    .filter((value) => !isRuntimePath(value) && (!selected || selected.has(value)));
   if (files.length) await git(cwd, ["add", "-N", "--", ...files]);
-  const result = await runCommand("git", ["diff", "--binary", "--no-ext-diff", "HEAD"], { cwd, timeoutMs: 120_000 });
+  const args = ["diff", "--binary", "--no-ext-diff", "HEAD"];
+  if (selected) args.push("--", ...[...selected].sort());
+  const result = await runCommand("git", args, { cwd, timeoutMs: 120_000 });
   if (result.exitCode !== 0) throw new Error(`could not capture patch: ${result.stderr}`);
   return Buffer.from(result.stdout, "utf8");
 }

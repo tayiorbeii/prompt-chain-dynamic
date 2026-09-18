@@ -280,14 +280,18 @@ export async function completeChainAutonomously(options: AutonomousOptions): Pro
   let state = await superviseToTerminal(repository, options.state, options.backend, options.onEvent);
 
   if (state.status !== "completed") {
-    const waitingOnHuman = state.status === "paused" && state.pauseKind === "decision_pending" && state.decisionMode === "human";
+    const operatorNote = state.status === "paused" && state.pauseKind === "decision_pending" && state.decisionMode === "human"
+      ? `Run ${state.id} is waiting for a human decision. Record it with /prompt-chain-decide, then /prompt-chain-resume.`
+      : state.status === "paused" && state.pauseKind === "workspace_drift"
+        ? `Run ${state.id} paused before commit because the workspace needs cleanup. Preserve or move the paths named in the pause reason, then run /prompt-chain-resume ${state.id}.`
+        : state.status === "paused" && state.pauseKind === "review_blocked"
+          ? `Run ${state.id} paused without committing because required integration evidence is still blocked. Supply or fix that evidence, then run /prompt-chain-resume ${state.id} for another bounded repair window.`
+          : `Run ${state.id} ended ${state.status}; follow-ups were not started.`;
     return {
       state,
       runs: [],
       remainingItems: collectFollowUpItems(state).length,
-      notes: [waitingOnHuman
-        ? `Run ${state.id} is waiting for a human decision. Record it with /prompt-chain-decide, then /prompt-chain-resume.`
-        : `Run ${state.id} ended ${state.status}; follow-ups were not started.`],
+      notes: [operatorNote],
     };
   }
 
