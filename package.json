@@ -45,13 +45,15 @@
     "docs/FURTHER-OPPORTUNITIES.md",
     "docs/IMPLEMENTATION-STATUS.md",
     "docs/PROJECT-CREATION.md",
-    "docs/SECURITY.md"
+    "docs/SECURITY.md",
+    "docs/CANARY.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.10"
   },
   "scripts": {
     "test": "npm run check && node --experimental-strip-types --test tests/*.test.ts",
+    "test:canary": "PROMPT_CHAIN_REAL_AGENT_CANARY=1 node --experimental-strip-types --test tests/canary.real-agent.test.ts",
     "validate:example": "node --experimental-strip-types bin/trip-validate.ts examples/example.trip.json",
     "compile:example": "node --experimental-strip-types bin/trip-compile.ts examples/example.plan.md --out examples/generated.trip.json --working-directory . --mode auto",
     "smoke": "bash scripts/smoke.sh",

@@ -274,11 +274,11 @@ npm run smoke
 npm pack --dry-run
 ```
 
-Current automated suite: 21 tests, including real temporary Git repositories and worktrees.
+Current automated suite: 113 tests (112 run against mocked agent backends using real temporary Git repositories and worktrees; 1 real-agent canary is skipped by default). Run the canary deliberately with `npm run test:canary` — see [docs/CANARY.md](docs/CANARY.md).
 
 ## Important limitations
 
-- The package has not been exercised here against a real authenticated model session.
+- The mocked test suite is the default signal; a minimal real-agent canary exists (`npm run test:canary`, [docs/CANARY.md](docs/CANARY.md)) but is not run automatically and does not substitute for exercising the package against a real authenticated model session at the scale of an actual project.
 - Only one same-base parallel writer wave is supported.
 - The issue controller is local JSONL, not a GitHub/Linear adapter.
 - There is no dedicated combined TUI; Pi commands expose status while dynamic-workflows persists agent sessions.
