@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readlink } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, readFile, readlink, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { ValidationResult } from "./types.ts";
@@ -160,19 +161,71 @@ export async function calculateStageDelta(
   return { changedDuring: changedDuring.sort(), after };
 }
 
+function literalPathspec(value: string): string {
+  return `:(literal)${value}`;
+}
+
+async function temporaryIndex(cwd: string): Promise<{ directory: string; index: string }> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "prompt-chain-index-"));
+  const index = path.join(directory, "index");
+  try {
+    const realIndexValue = await git(cwd, ["rev-parse", "--git-path", "index"]);
+    const realIndex = path.isAbsolute(realIndexValue) ? realIndexValue : path.resolve(cwd, realIndexValue);
+    await copyFile(realIndex, index);
+    return { directory, index };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function runGitWithEnv(
+  cwd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  timeoutMs = 120_000,
+  input?: string,
+): Promise<string> {
+  const result = await runCommand("git", args, { cwd, timeoutMs, env, input });
+  if (result.exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} failed (${result.exitCode}): ${result.stderr || result.stdout}`);
+  }
+  return result.stdout.trimEnd();
+}
+
 export async function captureBinaryPatch(cwd: string, includedPaths?: string[]): Promise<Buffer> {
   const selected = includedPaths ? new Set(includedPaths) : undefined;
   if (selected?.size === 0) return Buffer.alloc(0);
-  const untracked = await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  const files = untracked.split("\0")
-    .filter(Boolean)
-    .filter((value) => !isRuntimePath(value) && (!selected || selected.has(value)));
-  if (files.length) await git(cwd, ["add", "-N", "--", ...files]);
-  const args = ["diff", "--binary", "--no-ext-diff", "HEAD"];
-  if (selected) args.push("--", ...[...selected].sort());
-  const result = await runCommand("git", args, { cwd, timeoutMs: 120_000 });
-  if (result.exitCode !== 0) throw new Error(`could not capture patch: ${result.stderr}`);
-  return Buffer.from(result.stdout, "utf8");
+  const temporary = await temporaryIndex(cwd);
+  try {
+    const env = { GIT_INDEX_FILE: temporary.index };
+    const untracked = await runGitWithEnv(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], env);
+    const untrackedFiles = untracked.split("\0")
+      .filter(Boolean)
+      .filter((value) => !isRuntimePath(value) && (!selected || selected.has(value)));
+    if (untrackedFiles.length) {
+      await runGitWithEnv(cwd, ["add", "-N", "--", ...untrackedFiles.map(literalPathspec)], env);
+    }
+
+    let files: string[];
+    if (selected) {
+      files = [...selected].filter((value) => !isRuntimePath(value)).sort();
+    } else {
+      const tracked = await runGitWithEnv(cwd, ["diff", "--name-only", "-z", "HEAD"], env);
+      files = [...new Set([
+        ...tracked.split("\0").filter(Boolean),
+        ...untrackedFiles,
+      ])].filter((value) => !isRuntimePath(value)).sort();
+    }
+    if (!files.length) return Buffer.alloc(0);
+    const result = await runCommand("git", [
+      "diff", "--binary", "--no-ext-diff", "HEAD", "--", ...files.map(literalPathspec),
+    ], { cwd, timeoutMs: 120_000, env });
+    if (result.exitCode !== 0) throw new Error(`could not capture patch: ${result.stderr}`);
+    return Buffer.from(result.stdout, "utf8");
+  } finally {
+    await rm(temporary.directory, { recursive: true, force: true });
+  }
 }
 
 export async function applyPatch(cwd: string, patch: Buffer): Promise<void> {
@@ -220,9 +273,9 @@ export async function createWorktree(repository: string, runId: string, stageId:
  * the user's working branch — so it preserves verified work without polluting history.
  *
  * Implementation:
- *   1. git add -A  (stage all working-tree changes)
- *   2. git write-tree  (capture the staged tree)
- *   3. git reset HEAD  (unstage — working tree is preserved)
+ *   1. initialize a temporary index from the requested base revision
+ *   2. git apply --cached  (apply only the verified patch to the temporary index)
+ *   3. git write-tree  (capture the patched tree)
  *   4. git commit-tree  (create a detached commit object with trailers)
  *   5. git update-ref  (point the special ref at the new commit)
  *
@@ -233,22 +286,38 @@ export async function createCheckpointCommit(
   runId: string,
   stageId: string,
   trailers: Record<string, string>,
+  patch: Buffer,
+  baseRevision: string,
 ): Promise<string> {
   const ref = `refs/prompt-chain/runs/${runId}/stages/${stageId}`;
-  // Stage all working-tree changes so write-tree captures them
-  await git(cwd, ["add", "-A"]);
-  const treeHash = await git(cwd, ["write-tree"]);
-  // Unstage — working tree is unchanged
-  await git(cwd, ["reset", "HEAD"]);
-  const parentHash = await currentHead(cwd);
-  const message = `checkpoint(${stageId}): verified stage commit`;
-  const commitArgs = ["commit-tree", treeHash, "-p", parentHash, "-m", message];
-  for (const [key, value] of Object.entries(trailers)) {
-    commitArgs.push("-m", `${key}: ${value}`);
+  const actualBase = await currentHead(cwd);
+  if (actualBase !== baseRevision) {
+    throw new Error(`checkpoint base mismatch: expected ${baseRevision}, found ${actualBase}`);
   }
-  const commitHash = (await git(cwd, commitArgs)).trim();
-  await git(cwd, ["update-ref", ref, commitHash]);
-  return commitHash;
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "prompt-chain-checkpoint-"));
+  const index = path.join(temporary, "index");
+  try {
+    const env = { GIT_INDEX_FILE: index };
+    await runGitWithEnv(cwd, ["read-tree", baseRevision], env);
+    if (patch.length) {
+      await runGitWithEnv(cwd, ["apply", "--cached", "--binary", "--whitespace=nowarn", "-"], env, 120_000, patch.toString("utf8"));
+    }
+    const treeHash = await runGitWithEnv(cwd, ["write-tree"], env);
+    const message = `checkpoint(${stageId}): verified stage commit`;
+    const commitArgs = ["commit-tree", treeHash, "-p", baseRevision, "-m", message];
+    for (const [key, value] of Object.entries(trailers)) {
+      commitArgs.push("-m", `${key}: ${value}`);
+    }
+    const commitHash = await git(cwd, commitArgs);
+    const current = await currentHead(cwd);
+    if (current !== baseRevision) {
+      throw new Error(`checkpoint base changed: expected ${baseRevision}, found ${current}`);
+    }
+    await git(cwd, ["update-ref", ref, commitHash]);
+    return commitHash;
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 }
 
 export async function removeWorktree(repository: string, worktree: string): Promise<void> {

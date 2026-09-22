@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -58,6 +59,83 @@ async function createRepository(): Promise<string> {
   await git(root, ["commit", "-m", "initial"]);
   return root;
 }
+
+test("same-checkout checkpoints retain cumulative owned changes across serial writers", async () => {
+  const repository = await createRepository();
+  const baseRevision = await git(repository, ["rev-parse", "HEAD"]);
+  await writeFile(path.join(repository, "foreign.json"), "foreign staged content\\n");
+  await git(repository, ["add", "foreign.json"]);
+  const indexPath = await git(repository, ["rev-parse", "--git-path", "index"]);
+  const absoluteIndexPath = path.isAbsolute(indexPath) ? indexPath : path.join(repository, indexPath);
+  const indexBefore = await readFile(absoluteIndexPath);
+
+  class SerialCheckpointBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      if (request.stageId === "writer-one" && request.role === "implementation") {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "one.ts"), "export const one = 1;\\n");
+        return result("<status>complete</status><risk>low</risk><rationale>First writer complete.</rationale>");
+      }
+      if (request.stageId === "writer-two" && request.role === "implementation") {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "two.ts"), "export const two = 2;\\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Second writer complete.</rationale>");
+      }
+      if (request.stageId === "integrate" && request.role === "integration") {
+        return result("<status>complete</status><risk>low</risk><rationale>Integrated without additional changes.</rationale>");
+      }
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Serial checkpoint safety",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      reviewPolicy: { required: false, reviewerCount: 1, maxRepairRounds: 1, malformedVerdict: "continue", requireFreshClosureReviewer: false },
+    },
+    stages: [
+      { id: "writer-one", type: "implementation", needs: [], isolation: "same-checkout", prompt: "Write one.", allowedPaths: ["src/**"], claimedPaths: ["src/one.ts"] },
+      { id: "writer-two", type: "implementation", needs: ["writer-one"], isolation: "same-checkout", prompt: "Write two.", allowedPaths: ["src/**"], claimedPaths: ["src/two.ts"] },
+      { id: "integrate", type: "integration", needs: ["writer-two"], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate.", allowedPaths: ["src/**"] },
+    ],
+  };
+  const manifestPath = path.join(os.tmpdir(), `trip-serial-checkpoint-${Date.now()}-${Math.random()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const state = await runManifestFile({ manifestPath, backend: new SerialCheckpointBackend() });
+
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(state.baseRevision, baseRevision);
+  assert.equal(await git(repository, ["rev-parse", "HEAD"]), baseRevision);
+  assert.deepEqual(await readFile(absoluteIndexPath), indexBefore);
+  assert.equal(await git(repository, ["diff", "--cached", "--name-only"]), "foreign.json");
+
+  const firstCheckpoint = state.stageStates["writer-one"]?.verifiedCommit;
+  const secondCheckpoint = state.stageStates["writer-two"]?.verifiedCommit;
+  assert.ok(firstCheckpoint);
+  assert.ok(secondCheckpoint);
+  assert.equal(await git(repository, ["rev-parse", `refs/prompt-chain/runs/${state.id}/stages/writer-one`]), firstCheckpoint);
+  assert.equal(await git(repository, ["rev-parse", `refs/prompt-chain/runs/${state.id}/stages/writer-two`]), secondCheckpoint);
+  assert.equal(await git(repository, ["rev-parse", `${secondCheckpoint}^`]), baseRevision);
+  assert.equal(await git(repository, ["show", `${secondCheckpoint}:src/one.ts`]), "export const one = 1;\\n");
+  assert.equal(await git(repository, ["show", `${secondCheckpoint}:src/two.ts`]), "export const two = 2;\\n");
+  assert.equal(await git(repository, ["cat-file", "-e", `${secondCheckpoint}:foreign.json`]).catch(() => "missing"), "missing");
+
+  const patchPath = state.stageStates["writer-two"]?.cumulativePatchPath;
+  const patchDigest = state.stageStates["writer-two"]?.cumulativePatchSha256;
+  assert.ok(patchPath);
+  assert.ok(patchDigest);
+  const patch = await readFile(patchPath);
+  assert.equal(createHash("sha256").update(patch).digest("hex"), patchDigest);
+  assert.ok(patch.toString("utf8").includes("src/one.ts"));
+  assert.ok(patch.toString("utf8").includes("src/two.ts"));
+  assert.ok(!patch.toString("utf8").includes("foreign.json"));
+  const checkpointMessage = await git(repository, ["show", "--format=%B", "--no-patch", secondCheckpoint]);
+  assert.match(checkpointMessage, new RegExp(`Durable-Trip-Diff-Hash: ${patchDigest}`));
+  assert.match(checkpointMessage, new RegExp(`Durable-Trip-Base: ${baseRevision}`));
+});
 
 test("runtime closes free-form feedback before advancing", async () => {
   const repository = await createRepository();

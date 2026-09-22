@@ -1109,7 +1109,8 @@ async function persistWriterBoundary(
       "Durable-Trip-Validation": `stages/${stage.id}/attempt-${attemptNum}/validation.json`,
       "Durable-Trip-Review": `stages/${stage.id}/attempt-${attemptNum}/review-synthesis.json`,
       "Durable-Trip-Diff-Hash": digest,
-    });
+      "Durable-Trip-Base": context.state.baseRevision,
+    }, patch, context.state.baseRevision);
     stageState.verifiedCommit = checkpointHash;
   } catch {
     // Checkpoint creation is best-effort; do not fail the stage boundary
