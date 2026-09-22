@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeReview, synthesizeReviews } from "../src/review.ts";
+import { normalizeReview, synthesizeReviews, workerDirection } from "../src/review.ts";
 
 test("free-form corrective feedback is never treated as completion", () => {
   const review = normalizeReview("Stop the parent cluster list from reshuffling on exclude/include. Clusters are sorted descending by raw topic count, so excluding items re-sorts the list mid-task and you lose your place. Fix: lock the initial order, or sort by the original count instead of the live count.");
@@ -54,4 +54,15 @@ test("unstructured contradictory completion remains downgraded", () => {
   assert.equal(review.status, "continue");
   assert.equal(review.findings.length, 1);
   assert.equal(review.findings[0]?.blocking, true);
+});
+
+test("workerDirection turns a worker continue into direction, never a finding", () => {
+  const withMissing = normalizeReview("<status>continue</status><rationale>Half done.</rationale><missingItems>Add tests\nWire export</missingItems>");
+  assert.match(workerDirection(withMissing), /Complete the items you reported as missing:/);
+  assert.match(workerDirection(withMissing), /Add tests/);
+  assert.match(workerDirection(withMissing), /Wire export/);
+  const withFollowup = normalizeReview("<status>continue</status><rationale>Half done.</rationale><recommendedFollowupPrompt>Finish the export.</recommendedFollowupPrompt>");
+  assert.equal(workerDirection(withFollowup), "Finish the export.");
+  const bare = normalizeReview("<status>continue</status><rationale>Half done.</rationale>");
+  assert.equal(workerDirection(bare), "Address every open blocking finding, then rerun validation and review.");
 });

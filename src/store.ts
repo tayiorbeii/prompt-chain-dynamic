@@ -167,7 +167,30 @@ export function leaseIsFresh(state: RunState, now = Date.now()): boolean {
 
 export async function loadRunState(repositoryRoot: string, runId: string): Promise<RunState> {
   const content = await readFile(runStatePath(repositoryRoot, runId), "utf8");
-  return JSON.parse(content) as RunState;
+  const state = JSON.parse(content) as RunState;
+  migrateLegacyWorkerFindings(state);
+  return state;
+}
+
+/**
+ * Runs recorded before worker self-reports left the finding pipeline may hold
+ * findings with source "worker". They were never evidence; resolve them so they
+ * stop appearing in repair prompts, and keep the ledger type-valid.
+ */
+export function migrateLegacyWorkerFindings(state: RunState): number {
+  let migrated = 0;
+  for (const finding of state.findings ?? []) {
+    if ((finding as { source: string }).source !== "worker") continue;
+    finding.source = "operator";
+    if (finding.disposition === "open") finding.disposition = "resolved";
+    finding.resolutionEvidence = {
+      ...finding.resolutionEvidence,
+      actor: "migration",
+      rationale: "legacy worker self-report; not evidence",
+    };
+    migrated += 1;
+  }
+  return migrated;
 }
 
 export async function appendRunEvent(

@@ -101,6 +101,17 @@ export function findingsFromReview(
   }));
 }
 
+/**
+ * A worker's own verdict is direction for its next attempt, never evidence.
+ * It cannot open a Finding; only reviewers and deterministic validation can.
+ */
+export function workerDirection(review: NormalizedReview): string {
+  const missing = review.missingItems.map((item) => item.trim()).filter(Boolean);
+  if (missing.length) return `Complete the items you reported as missing:\n${missing.map((item) => `- ${item}`).join("\n")}`;
+  if (review.recommendedFollowupPrompt?.trim()) return review.recommendedFollowupPrompt.trim();
+  return "Address every open blocking finding, then rerun validation and review.";
+}
+
 export function formatOpenFindings(findings: Finding[]): string {
   if (!findings.length) return "No open findings.";
   return findings.map((finding, index) => [

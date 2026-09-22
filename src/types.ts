@@ -200,7 +200,8 @@ export interface Finding {
   runId: string;
   stageId: string;
   attempt: number;
-  source: "worker" | "deterministic-validation" | "independent-review" | "integration-review" | "operator";
+  /** Who produced the evidence. Worker self-reports are direction, never findings. */
+  source: "deterministic-validation" | "independent-review" | "integration-review" | "operator";
   severity: Severity;
   blocking: boolean;
   summary: string;

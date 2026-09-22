@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { git } from "../src/git.ts";
 import { runManifestFile } from "../src/runner.ts";
+import { loadRunState } from "../src/store.ts";
 import type { AgentBackend, AgentRequest, AgentResult, TripManifest } from "../src/types.ts";
 
 class FeedbackBackend implements AgentBackend {
@@ -669,4 +670,84 @@ test("required integration pauses instead of committing best-effort work with bl
   assert.equal(state.stageStates.integrate?.status, "paused");
   assert.equal(state.resultCommit, undefined);
   assert.ok(state.findings.some((finding) => finding.stageId === "integrate" && finding.blocking && finding.disposition === "open"));
+});
+
+// --- Slice 2: worker verdicts never mint findings ---
+
+test("worker continue returns never create findings and their missing items drive the next prompt", async () => {
+  const repository = await createRepository();
+  class SelfReportingBackend implements AgentBackend {
+    workerCalls = 0;
+    repairPrompts: string[] = [];
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context gathered.");
+      if (request.stageId === "impl" && (request.role === "implementation" || request.role === "repair")) {
+        this.workerCalls += 1;
+        if (request.role === "repair") this.repairPrompts.push(request.prompt);
+        if (this.workerCalls < 4) {
+          return result("<status>continue</status><risk>medium</risk><rationale>Verified the module already satisfies the contract but the export is missing.</rationale><missingItems>Add the named export\nAdd a regression test</missingItems><finding><severity>major</severity><blocking>true</blocking><summary>Worker-invented blocker</summary><evidence>none</evidence></finding>");
+        }
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "x.ts"), "export const x = 1;\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Added the export and test.</rationale>");
+      }
+      if (request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+      if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Worker self-reports",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      reviewPolicy: { required: true, reviewerCount: 1, maxRepairRounds: 4, malformedVerdict: "continue", requireFreshClosureReviewer: true },
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      { id: "impl", type: "implementation", needs: ["research"], isolation: "same-checkout", prompt: "Implement x.", allowedPaths: ["src/**"], claimedPaths: ["src/x.ts"] },
+      { id: "integrate", type: "integration", needs: ["impl"], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate.", allowedPaths: ["src/**"] },
+    ],
+  };
+  const manifestPath = path.join(os.tmpdir(), `worker-self-report-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const backend = new SelfReportingBackend();
+  const state = await runManifestFile({ manifestPath, backend });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(backend.workerCalls, 4);
+  assert.equal(state.findings.length, 0, "no finding may originate from the worker's own verdict");
+  assert.equal(backend.repairPrompts.length, 3);
+  for (const prompt of backend.repairPrompts) {
+    assert.match(prompt, /REQUIRED ACTION\nComplete the items you reported as missing:\n- Add the named export\n- Add a regression test/);
+    assert.match(prompt, /OPEN BLOCKING FINDINGS\nNo open findings\./);
+    assert.doesNotMatch(prompt, /Worker-invented blocker/);
+  }
+});
+
+test("legacy worker-sourced findings load as resolved", async () => {
+  const repository = await createRepository();
+  const runId = "trip-legacy-worker-finding";
+  const root = path.join(repository, ".pi", "prompt-chain-hybrid", "runs", runId);
+  await mkdir(root, { recursive: true });
+  const legacy = {
+    formatVersion: 1,
+    id: runId,
+    status: "paused",
+    findings: [
+      { id: "finding-legacy", runId, stageId: "impl", attempt: 2, source: "worker", severity: "major", blocking: true, summary: "Verified the module already satisfies the contract", evidence: "prose", affectedPaths: [], disposition: "open", createdAt: "2026-07-22T15:57:19.000Z", updatedAt: "2026-07-22T15:57:19.000Z" },
+      { id: "finding-review", runId, stageId: "impl", attempt: 1, source: "independent-review", severity: "major", blocking: true, summary: "Missing export", evidence: "x.ts", affectedPaths: ["src/x.ts"], disposition: "open", createdAt: "2026-07-22T15:55:01.000Z", updatedAt: "2026-07-22T15:55:01.000Z" },
+    ],
+    stageStates: {},
+    decisionRequests: [],
+    decisions: [],
+  };
+  await writeFile(path.join(root, "run.json"), JSON.stringify(legacy));
+  const state = await loadRunState(repository, runId);
+  const migrated = state.findings.find((finding) => finding.id === "finding-legacy");
+  assert.equal(migrated?.disposition, "resolved");
+  assert.equal(migrated?.source, "operator");
+  assert.equal(migrated?.resolutionEvidence?.rationale, "legacy worker self-report; not evidence");
+  assert.equal(state.findings.find((finding) => finding.id === "finding-review")?.disposition, "open");
 });

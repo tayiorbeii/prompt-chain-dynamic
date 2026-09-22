@@ -30,6 +30,7 @@ import {
   openBlockingFindings,
   reconcileOpenFindings,
   synthesizeReviews,
+  workerDirection,
 } from "./review.ts";
 import { buildDecisionPrompt, decisionRequestFromReview, parseDecision } from "./decision.ts";
 import { hashContract } from "./contract.ts";
@@ -672,7 +673,12 @@ async function runWriterStage(
 
     const workerReview = normalizeReview(result.text);
     if (workerReview.status !== "complete") {
-      const direction = await handleNonCompleteVerdict(context, stage, stageState, workerReview, "worker", agentCwd);
+      // The worker's self-report never enters the finding pipeline: a
+      // `continue` becomes direction for the next attempt, and `blocked` or
+      // `needs_decision` escalate without minting findings from worker prose.
+      const direction = workerReview.status === "continue"
+        ? workerDirection(workerReview)
+        : await resolveWorkerEscalation(context, stage, workerReview, agentCwd);
       const candidatePatch = await captureBinaryPatch(gitRoot, candidatePatchPaths);
       const diffHash = sha256(candidatePatch);
       const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
@@ -680,7 +686,9 @@ async function runWriterStage(
         attempt: attemptNum,
         role,
         validationResults: stageState.validationResults,
-        reviewVerdict: workerReview,
+        // Findings a worker embeds in its own verdict are not evidence; drop them
+        // so they never echo back into later prompts as attempt evidence.
+        reviewVerdict: { ...workerReview, findings: [] },
         diffHash,
         patchPath,
         patchSha256: diffHash,
@@ -912,12 +920,28 @@ async function runIntegrationStage(context: RunnerContext, stage: TripStage, sta
   }
 }
 
+/**
+ * Worker `blocked` and `needs_decision` verdicts still need a resolution path,
+ * but any findings the worker embedded in its own response are ignored; a
+ * reviewer must raise them independently.
+ */
+async function resolveWorkerEscalation(
+  context: RunnerContext,
+  stage: TripStage,
+  review: NormalizedReview,
+  agentCwd: string,
+): Promise<string> {
+  if (review.status === "needs_decision") return await resolveDecision(context, stage, review, agentCwd);
+  return review.recommendedFollowupPrompt
+    ?? `Use best judgement to resolve or safely work around this blocker without expanding scope: ${review.rationale}`;
+}
+
 async function handleNonCompleteVerdict(
   context: RunnerContext,
   stage: TripStage,
   stageState: StageRunState,
   review: NormalizedReview,
-  source: Finding["source"],
+  source: "independent-review" | "integration-review",
   agentCwd: string,
 ): Promise<string> {
   let findings = findingsFromReview(review, {
@@ -1269,11 +1293,11 @@ ${direction}
 
 Use the prior attempt evidence before editing. The current diff and the failing command output are authoritative. Do not repeat an approach that left the same failure unresolved: identify why it did not work, then take a materially different, evidence-based repair path.
 
-After repairing, run the targeted checks you can run. Do not commit. End with:
+After repairing, run the targeted checks you can run. Do not commit. The runtime acts on missingItems, not on prose: list every concrete item that still blocks completion there, and return complete when nothing remains. End with:
 <status>complete|continue|blocked|needs_decision</status>
 <risk>low|medium|high|critical</risk>
 <rationale>what changed and why it addresses every open finding</rationale>
-<missingItems>anything still unresolved</missingItems>
+<missingItems>anything still unresolved, one concrete item per line</missingItems>
 <recommendedFollowupPrompt>next action if not complete</recommendedFollowupPrompt>`;
 }
 
