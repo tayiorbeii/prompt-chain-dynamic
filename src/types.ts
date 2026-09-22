@@ -295,6 +295,12 @@ export interface AgentRequest {
   /** Report observed agent/tool activity, not an unconditional heartbeat. */
   onActivity?: () => void;
   artifactDirectory: string;
+  /**
+   * Distinguishes persisted agent sessions beyond stage and role. Fresh closure
+   * reviewers set it per attempt and reviewer index so no reviewer inherits a
+   * transcript from an earlier verdict.
+   */
+  sessionScope?: string;
 }
 
 export interface AgentResult {

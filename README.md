@@ -40,7 +40,7 @@ Humans normally author Markdown. JSON is the frozen machine contract and may als
 - Typed structured output through `WorkflowAgent` and TypeBox.
 - Free-form corrective feedback defaults to `continue`, never completion.
 - Durable blocking finding ledger and same-stage repair loop with bounded recent attempt, validation, and review evidence carried into every repair.
-- Fresh independent reviewer ensemble after each repair.
+- Fresh independent reviewer ensemble after each repair. With `reviewPolicy.requireFreshClosureReviewer` (default `true`) every reviewer call gets its own persisted session, scoped by attempt and reviewer index, so no reviewer inherits an earlier verdict's transcript; set it to `false` to reuse one review session per stage and trade that isolation for cached context.
 - Agent decisions by default; `--human-decisions` records the recommendation for later human review without wedging execution.
 - Redundant detached stale-lease reapers with atomic generation claims, so dead workers/reapers are automatically replaced without duplicate resumes.
 - Bounded agent, decision, and heartbeat-shutdown waits; by default, exhausted work pauses the run for operator review instead of being silently accepted (`continuationPolicy.bestEffortCompletion: false`). Set `bestEffortCompletion: true` to opt into the legacy behavior of accepting exhausted safe work best-effort with durable follow-up notes instead of pausing.

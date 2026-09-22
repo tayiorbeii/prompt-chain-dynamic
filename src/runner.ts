@@ -852,7 +852,7 @@ async function runWriterStage(
         diffHash,
         patchPath,
         patchSha256: diffHash,
-        asi: { source: "ensemble-review", completionClaim: true },
+        asi: { source: "ensemble-review", completionClaim: true, freshReviewers: context.manifest.settings?.reviewPolicy?.requireFreshClosureReviewer !== false },
         status: "keep",
         startedAt: attemptStartedAt,
         completedAt: new Date().toISOString(),
@@ -892,7 +892,7 @@ async function runWriterStage(
       diffHash,
       patchPath,
       patchSha256: diffHash,
-      asi: { source: integration ? "integration-review" : "independent-review", completionClaim: true },
+      asi: { source: integration ? "integration-review" : "independent-review", completionClaim: true, freshReviewers: context.manifest.settings?.reviewPolicy?.requireFreshClosureReviewer !== false },
       status: "discard",
       startedAt: attemptStartedAt,
       completedAt: new Date().toISOString(),
@@ -1158,6 +1158,10 @@ async function runReviewers(
 ): Promise<NormalizedReview[]> {
   if (context.manifest.settings?.reviewPolicy?.required === false) return [normalizeReview("<status>complete</status><risk>low</risk><rationale>Review disabled by manifest policy.</rationale>")];
   const count = context.manifest.settings?.reviewPolicy?.reviewerCount ?? 2;
+  // Fresh closure reviewers never share a persisted transcript: reviewers in
+  // one attempt already shared a session name, and so did the same reviewer
+  // across repairs, which let an earlier verdict leak into a later one.
+  const freshReviewers = context.manifest.settings?.reviewPolicy?.requireFreshClosureReviewer !== false;
   const open = openBlockingFindings(context.state.findings, stage.id);
   const angles = [
     "correctness, plan conformance, and user-visible regressions",
@@ -1168,6 +1172,7 @@ async function runReviewers(
     const prompt = reviewPrompt(context, stage, validation, open, angles[index % angles.length] ?? "correctness", integration);
     const artifactDirectory = attemptDirectory(context, stage.id, attemptNum, `reviewer-${index + 1}`);
     const request = agentRequest(context, stage, "review", cwd, prompt, artifactDirectory, ["read", "grep", "find", "ls"]);
+    if (freshReviewers) request.sessionScope = `attempt-${attemptNum} reviewer-${index + 1}`;
     const result = await runAgent(context, request, `reviewer ${index + 1} for ${stage.id}`);
     const review = result.success
       ? normalizeReview(result.text)

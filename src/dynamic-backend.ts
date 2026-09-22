@@ -84,7 +84,7 @@ export class DynamicWorkflowBackend implements AgentBackend {
       const common = {
         cwd: request.cwd,
         label: `${request.stageId}:${request.role}`,
-        sessionName: `prompt-chain:${request.runId} ${request.stageId}:${request.role}`,
+        sessionName: `prompt-chain:${request.runId} ${request.stageId}:${request.role}${request.sessionScope ? ` ${request.sessionScope}` : ""}`,
         tier: this.#options.roleTiers?.[request.role] ?? defaultTier(request.role),
         model: this.#options.roleModels?.[request.role],
         toolNames: request.tools,

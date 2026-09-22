@@ -937,3 +937,56 @@ test("two identical worker returns earn one nudge and the reflection cap forces 
   assert.equal(state.stageStates.impl?.workerReflections, 0, "a completion claim resets the counter");
   assert.match(formatRunSummary(state), /Worker reflections: 0\/3/);
 });
+
+// --- Slice 5: fresh closure reviewers ---
+
+async function runFreshReviewerScenario(requireFresh: boolean): Promise<{ scopes: Array<string | undefined>; state: Awaited<ReturnType<typeof runManifestFile>> }> {
+  const repository = await createRepository();
+  const scopes: Array<string | undefined> = [];
+  let reviewRound = 0;
+  class TwoRoundBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context.");
+      if (request.stageId === "impl" && (request.role === "implementation" || request.role === "repair")) {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "x.ts"), request.role === "repair" ? "export const x = 2;\n" : "export const x = 1;\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.stageId === "impl" && request.role === "review") {
+        scopes.push(request.sessionScope);
+        reviewRound += 1;
+        // Two reviewers per attempt: the first attempt's pair both request a repair.
+        if (reviewRound <= 2) return result("<status>continue</status><risk>medium</risk><rationale>Needs a fix.</rationale><finding><severity>major</severity><blocking>true</blocking><summary>x must be 2</summary><evidence>src/x.ts:1</evidence></finding>");
+        return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+      }
+      if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      if (request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Fine.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const manifest = slice3Manifest(repository, { validationCommands: ["true"] });
+  manifest.settings = {
+    autoCommit: false,
+    reviewPolicy: { required: true, reviewerCount: 2, maxRepairRounds: 4, malformedVerdict: "continue", requireFreshClosureReviewer: requireFresh },
+  };
+  const manifestPath = await writeManifest(`fresh-${requireFresh}`, manifest);
+  const state = await runManifestFile({ manifestPath, backend: new TwoRoundBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  return { scopes, state };
+}
+
+test("fresh closure reviewers get distinct session scopes per attempt and reviewer", async () => {
+  const { scopes, state } = await runFreshReviewerScenario(true);
+  assert.equal(scopes.length, 4, "two reviewers over two attempts");
+  assert.equal(new Set(scopes).size, 4, "no two reviewer calls share a scope");
+  for (const scope of scopes) assert.match(scope ?? "", /^attempt-\d+ reviewer-[12]$/);
+  assert.equal(state.stageStates.impl?.attempts.at(-1)?.asi.freshReviewers, true);
+});
+
+test("disabling fresh closure reviewers reuses the per-stage review session", async () => {
+  const { scopes, state } = await runFreshReviewerScenario(false);
+  assert.equal(scopes.length, 4);
+  assert.ok(scopes.every((scope) => scope === undefined));
+  assert.equal(state.stageStates.impl?.attempts.at(-1)?.asi.freshReviewers, false);
+});

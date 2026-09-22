@@ -32,3 +32,19 @@ test("backend forwards supported activity hooks without a deadline and preserves
   assert.equal(activity, 2);
   assert.equal(usageReports, 1);
 });
+
+test("session scope extends the persisted session name only when present", async (t) => {
+  const names: Array<string | undefined> = [];
+  t.mock.method(WorkflowAgent.prototype, "run", async (...[_prompt, options]: Parameters<WorkflowAgent["run"]>) => {
+    names.push(options?.sessionName);
+    return { status: "complete", rationale: "Finished", risk: "low" };
+  });
+  const backend = new DynamicWorkflowBackend();
+  const base: AgentRequest = {
+    runId: "run", stageId: "stage", role: "review", cwd: process.cwd(),
+    prompt: "Review", tools: ["read"], timeoutMs: 0, artifactDirectory: ".",
+  };
+  await backend.run(base);
+  await backend.run({ ...base, sessionScope: "attempt-2 reviewer-1" });
+  assert.deepEqual(names, ["prompt-chain:run stage:review", "prompt-chain:run stage:review attempt-2 reviewer-1"]);
+});
