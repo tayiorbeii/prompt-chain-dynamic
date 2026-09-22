@@ -21,8 +21,19 @@ export function stagnationFingerprint(attempt: AttemptRecord): string {
     .sort()
     .join("|");
 
+  // Status and missing items make two worker self-reports comparable: a
+  // worker that keeps returning the same `continue` with the same missing
+  // items over the same diff is stuck even when no reviewer has spoken yet.
+  const missingItems = attempt.reviewVerdict.missingItems
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .sort()
+    .join("|");
+
   const content = [
+    attempt.reviewVerdict.status,
     blockingFindings,
+    missingItems,
     validationFailures,
     attempt.diffHash,
     attempt.reviewVerdict.recommendedFollowupPrompt ?? "",

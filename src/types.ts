@@ -81,6 +81,8 @@ export interface ContinuationPolicy {
   automaticFollowUpPasses?: number;
   /** Attempts allowed in each automatic remediation window. Defaults to 5. */
   automaticFollowUpAttemptLimit?: number;
+  /** Consecutive worker-only `continue` returns tolerated before the next return is forced through validation and review. Defaults to 3. */
+  maxWorkerReflections?: number;
   checkpointVerifiedStages?: boolean;
   onRequiredExhaustion?: "research";
   onOptionalExhaustion?: "checkpoint-and-follow-up";
@@ -313,6 +315,8 @@ export interface StageRunState {
   /** Recovery-aware attempt history. */
   attempts: AttemptRecord[];
   reviewRounds: number;
+  /** Consecutive worker `continue` returns that were not completion claims; reset by any claim. */
+  workerReflections?: number;
   schedulingReason?: StageSchedulingReason;
   blockedBy?: string[];
   contractHash?: string;

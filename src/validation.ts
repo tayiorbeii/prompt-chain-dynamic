@@ -61,6 +61,7 @@ export function normalizeManifest(input: TripManifest): TripManifest {
         // `continuationPolicy.bestEffortCompletion: true` explicitly to opt
         // back into the old accept-and-follow-up behavior.
         bestEffortCompletion: false,
+        maxWorkerReflections: 3,
         ...input.settings?.continuationPolicy,
       },
       defaultValidationCommands: input.settings?.defaultValidationCommands ?? [],

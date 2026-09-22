@@ -165,3 +165,20 @@ test("research hook non-zero exit produces failure result", async () => {
   assert.equal(output.success, false, `expected failure but got: ${JSON.stringify(output)}`);
   assert.ok(output.error?.includes("exited") || output.error?.includes("1"), `error: ${output.error}`);
 });
+
+// ─── Slice 4: worker self-reports are comparable ─────────────────────────────
+
+test("stagnationFingerprint differs when only the missing items differ", () => {
+  const a = makeAttempt({ reviewVerdict: makeReview({ missingItems: ["Add tests"] }), diffHash: "same" });
+  const b = makeAttempt({ reviewVerdict: makeReview({ missingItems: ["Wire export"] }), diffHash: "same" });
+  const c = makeAttempt({ reviewVerdict: makeReview({ missingItems: [" Add tests "] }), diffHash: "same" });
+  assert.notEqual(stagnationFingerprint(a), stagnationFingerprint(b));
+  assert.equal(stagnationFingerprint(a), stagnationFingerprint(c), "whitespace-only differences are not progress");
+});
+
+test("stagnationFingerprint differs when only the review status differs", () => {
+  const a = makeAttempt({ reviewVerdict: makeReview({ status: "continue" }), diffHash: "same" });
+  const b = makeAttempt({ reviewVerdict: makeReview({ status: "blocked" }), diffHash: "same" });
+  assert.notEqual(stagnationFingerprint(a), stagnationFingerprint(b));
+  assert.equal(isStagnant([a, b], 2), false);
+});

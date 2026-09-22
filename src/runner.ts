@@ -575,6 +575,13 @@ async function runWriterStage(
   let consecutiveNonProgress = 0;
   let consecutiveReviewChurn = 0;
   let researchEscalations = 0;
+  // Worker-only `continue` returns are bounded separately (aider's reflection
+  // cap): after maxWorkerReflections in a row the next return is forced through
+  // validation and review whatever the worker says.
+  const maxWorkerReflections = continuationPolicy?.maxWorkerReflections ?? 3;
+  let consecutiveWorkerContinues = stageState.workerReflections ?? 0;
+  let stuckNudged = false;
+  let reflectionCapAnnounced = false;
 
   while (true) {
     const kind = consecutiveReviewChurn >= maxConsecutiveFailures ? "review-only churn" : "non-progressing worker or validation attempts";
@@ -673,7 +680,18 @@ async function runWriterStage(
     const candidatePatchPaths = patchPathsForStage(context, stage, cumulativeAttemptDelta.changedDuring);
 
     const workerReview = normalizeReview(result.text);
-    const completionClaim = isCompletionClaim(workerReview);
+    const forcedClaim = workerReview.status === "continue"
+      && !isCompletionClaim(workerReview)
+      && consecutiveWorkerContinues >= maxWorkerReflections;
+    if (forcedClaim && !reflectionCapAnnounced) {
+      reflectionCapAnnounced = true;
+      await emit(context, "stage.worker.reflection_cap", `Stage ${stage.id}: ${consecutiveWorkerContinues} consecutive worker continue returns reached the reflection cap (${maxWorkerReflections}); routing this return through validation and review`, stage.id);
+    }
+    const completionClaim = isCompletionClaim(workerReview) || forcedClaim;
+    if (completionClaim) {
+      consecutiveWorkerContinues = 0;
+      stageState.workerReflections = 0;
+    }
     // Deterministic validation runs on every attempt regardless of the worker's
     // status, so repair prompts and reviewers always see real evidence.
     const validation = await validateStage(context, stage, stageState, agentCwd, integration, attemptNum);
@@ -681,7 +699,7 @@ async function runWriterStage(
       // The worker's self-report never enters the finding pipeline: a
       // `continue` becomes direction for the next attempt, and `blocked` or
       // `needs_decision` escalate without minting findings from worker prose.
-      const direction = workerReview.status === "continue"
+      let direction = workerReview.status === "continue"
         ? workerDirection(workerReview)
         : await resolveWorkerEscalation(context, stage, workerReview, agentCwd);
       const candidatePatch = await captureBinaryPatch(gitRoot, candidatePatchPaths);
@@ -705,6 +723,18 @@ async function runWriterStage(
       };
       attemptHistory.push(discardRecord);
       consecutiveNonProgress++;
+      if (workerReview.status === "continue") {
+        consecutiveWorkerContinues += 1;
+        stageState.workerReflections = consecutiveWorkerContinues;
+        // OpenHands-style stuck detection: two identical worker returns over
+        // the same diff earn one nudge that names the loop and the exit.
+        const workerAttempts = attemptHistory.filter((entry) => entry.asi.source === "worker");
+        if (!stuckNudged && isStagnant(workerAttempts, 2)) {
+          stuckNudged = true;
+          await emit(context, "stage.worker.stuck", `Stage ${stage.id}: the last two worker returns were identical (same diff, status and missing items)`, stage.id);
+          direction = `${STUCK_WORKER_NUDGE}\n\n${direction}`;
+        }
+      }
       stageState.reviewRounds += 1;
       if (stageState.reviewRounds > maximumRounds) {
         const next = await advanceRepairStrategy(context, stage, stageState, agentCwd, attemptHistory, direction, researchEscalations);
@@ -1313,6 +1343,13 @@ function validationFinding(
     updatedAt: now,
   };
 }
+
+const STUCK_WORKER_NUDGE = [
+  "STUCK LOOP DETECTED",
+  "Your last two responses were identical: same diff, same status, same missing items. Repeating them will not work.",
+  "The runtime acts only on what you return: a `continue` with an empty missingItems list is treated as a completion claim and goes to validation and independent review; a `continue` with missing items comes straight back to you without review.",
+  "Either finish the listed items and return complete, or list the concrete, different items that still block you and change your approach to them.",
+].join("\n");
 
 function outputFinding(
   context: RunnerContext,

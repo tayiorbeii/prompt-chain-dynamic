@@ -83,7 +83,7 @@ export function buildRunSummarySections(state: RunState, requestedAt = new Date(
   if (state.pauseReason) header.push(`Pause reason: ${state.pauseReason}`);
 
   const stages = state.manifest.stages.map((stage) => {
-    const lines = formatStage(stage, state.stageStates[stage.id], state.findings, requestedAt, state.status, runEnd);
+    const lines = formatStage(stage, state.stageStates[stage.id], state.findings, requestedAt, state.status, runEnd, state.manifest.settings?.continuationPolicy?.maxWorkerReflections ?? 3);
     return { id: stage.id, title: lines[0] ?? `? ${stage.id}`, lines: lines.slice(1) };
   });
   return { header, stages };
@@ -106,6 +106,7 @@ function formatStage(
   requestedAt: Date,
   runStatus: RunState["status"],
   runEnd: string,
+  maxWorkerReflections = 3,
 ): string[] {
   if (!value) {
     return [
@@ -129,7 +130,7 @@ function formatStage(
     `  Task: ${summarizePrompt(stage.prompt)}`,
     `  Depends on: ${formatList(stage.needs)}`,
     `  Started: ${formatTimestamp(value.startedAt)} | Finished: ${formatTimestamp(value.completedAt)} | Elapsed since start: ${formatDuration(value.startedAt, stageEnd)}`,
-    `  Attempts: ${value.attempts.length} (accepted ${attemptsByStatus.keep}, repair requested ${attemptsByStatus.discard}, checks failed ${attemptsByStatus.checks_failed}, crashed ${attemptsByStatus.crash}) | Repair rounds: ${value.reviewRounds}`,
+    `  Attempts: ${value.attempts.length} (accepted ${attemptsByStatus.keep}, repair requested ${attemptsByStatus.discard}, checks failed ${attemptsByStatus.checks_failed}, crashed ${attemptsByStatus.crash}) | Repair rounds: ${value.reviewRounds} | Worker reflections: ${value.workerReflections ?? 0}/${maxWorkerReflections}`,
   ];
 
   if (latestAttempt) lines.push(`  Latest attempt: ${formatAttempt(latestAttempt, requestedAt)}`);

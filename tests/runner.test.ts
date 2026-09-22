@@ -7,6 +7,7 @@ import test from "node:test";
 import { git } from "../src/git.ts";
 import { runManifestFile } from "../src/runner.ts";
 import { loadRunState } from "../src/store.ts";
+import { formatRunSummary } from "../src/status.ts";
 import type { AgentBackend, AgentRequest, AgentResult, TripManifest } from "../src/types.ts";
 
 class FeedbackBackend implements AgentBackend {
@@ -720,7 +721,7 @@ test("worker continue returns never create findings and their missing items driv
   assert.equal(state.findings.length, 0, "no finding may originate from the worker's own verdict");
   assert.equal(backend.repairPrompts.length, 3);
   for (const prompt of backend.repairPrompts) {
-    assert.match(prompt, /REQUIRED ACTION\nComplete the items you reported as missing:\n- Add the named export\n- Add a regression test/);
+    assert.match(prompt, /REQUIRED ACTION\n(?:[\s\S]*?\n\n)?Complete the items you reported as missing:\n- Add the named export\n- Add a regression test/);
     assert.match(prompt, /OPEN BLOCKING FINDINGS\nNo open findings\./);
     assert.doesNotMatch(prompt, /Worker-invented blocker/);
   }
@@ -893,4 +894,46 @@ test("a writer stage without validation commands warns exactly once and tells re
   assert.match(reviewPrompt, /This stage declares no validation commands\. That is a plan defect/);
   const events = (await readFile(path.join(repository, ".pi", "prompt-chain-hybrid", "runs", state.id, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; stageId?: string });
   assert.equal(events.filter((event) => event.type === "stage.validation.none" && event.stageId === "impl").length, 1);
+});
+
+// --- Slice 4: stuck detection and the worker reflection cap ---
+
+test("two identical worker returns earn one nudge and the reflection cap forces review", async () => {
+  const repository = await createRepository();
+  let workerCalls = 0;
+  let reviewCalls = 0;
+  const repairPrompts: string[] = [];
+  class RepeatingBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context.");
+      if (request.stageId === "impl" && (request.role === "implementation" || request.role === "repair")) {
+        workerCalls += 1;
+        if (request.role === "repair") repairPrompts.push(request.prompt);
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "x.ts"), "export const x = 1;\n");
+        // Never claims completion: same diff, same status, same missing item, forever.
+        return result("<status>continue</status><risk>low</risk><rationale>Still verifying.</rationale><missingItems>Double-check the export</missingItems>");
+      }
+      if (request.stageId === "impl" && request.role === "review") { reviewCalls += 1; return result("<status>complete</status><risk>low</risk><rationale>The export exists and is correct.</rationale>"); }
+      if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      if (request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Fine.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const manifestPath = await writeManifest("reflection-cap", slice3Manifest(repository, { validationCommands: ["true"] }));
+  const state = await runManifestFile({ manifestPath, backend: new RepeatingBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(workerCalls, 4, "three worker-only continues, then the fourth is forced through review");
+  assert.equal(reviewCalls, 1);
+  assert.equal(repairPrompts.length, 3);
+  const nudged = repairPrompts.filter((prompt) => prompt.includes("STUCK LOOP DETECTED"));
+  assert.equal(nudged.length, 1, "the nudge appears exactly once");
+  assert.equal(repairPrompts[0]?.includes("STUCK LOOP DETECTED"), false, "one attempt is not yet a loop");
+  assert.equal(repairPrompts[1]?.includes("STUCK LOOP DETECTED"), true, "two identical returns are");
+  const events = (await readFile(path.join(repository, ".pi", "prompt-chain-hybrid", "runs", state.id, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; stageId?: string });
+  assert.equal(events.filter((event) => event.type === "stage.worker.reflection_cap" && event.stageId === "impl").length, 1);
+  assert.equal(events.filter((event) => event.type === "stage.worker.stuck" && event.stageId === "impl").length, 1);
+  assert.equal(state.stageStates.impl?.workerReflections, 0, "a completion claim resets the counter");
+  assert.match(formatRunSummary(state), /Worker reflections: 0\/3/);
 });
