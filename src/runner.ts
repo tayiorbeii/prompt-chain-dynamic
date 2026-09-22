@@ -341,11 +341,28 @@ async function executeLoop(context: RunnerContext): Promise<RunState> {
   await writeRunState(context.repositoryRoot, state);
 
   try {
+    // Bounded pool (wireit's WorkerPool shape): dispatch while slots remain,
+    // await the first completion, re-evaluate readiness. Exclusive stages
+    // follow nx's `parallelism: false` rule via selectDispatchable.
+    const limit = Math.max(1, context.manifest.settings?.maxParallel ?? 4);
+    const stageById = new Map(context.manifest.stages.map((stage) => [stage.id, stage]));
+    const inFlight = new Map<string, Promise<void>>();
+    const failures: unknown[] = [];
+    let haltDispatch: unknown;
+    const dispatch = (stage: TripStage): void => {
+      const tracked = executeStage(context, stage)
+        .catch((error: unknown) => { failures.push(error); })
+        .finally(() => { inFlight.delete(stage.id); });
+      inFlight.set(stage.id, tracked);
+    };
     while (true) {
       await refreshRunControl(context);
-      if (state.abortRequested) throw new AbortRun(`Run ${state.id} aborted at a durable boundary`);
+      if (state.abortRequested) haltDispatch ??= new AbortRun(`Run ${state.id} aborted at a durable boundary`);
+      // A pause, abort or stage failure stops new dispatch; in-flight siblings
+      // still reach their durable boundary before the error propagates.
+      if (haltDispatch !== undefined && !inFlight.size) throw haltDispatch;
       const pending = context.manifest.stages.filter((stage) => state.stageStates[stage.id]?.status === "pending");
-      if (!pending.length) {
+      if (!pending.length && !inFlight.size) {
         const failedRequired = context.manifest.stages.find((stage) => stage.required !== false && state.stageStates[stage.id]?.status === "failed");
         if (failedRequired) state.status = "failed";
         else if (Object.values(state.stageStates).some((entry) => entry.status === "paused")) state.status = "paused";
@@ -356,51 +373,55 @@ async function executeLoop(context: RunnerContext): Promise<RunState> {
         await writeRunState(context.repositoryRoot, state);
         return state;
       }
-      const ready = pending.filter((stage) => stage.needs.every((dependency) => state.stageStates[dependency]?.status === "completed"));
-      if (!ready.length) {
-        // Mark stages whose dependencies have failed or been skipped as skipped with
-        // a typed schedulingReason — no plain Error thrown.
-        const newlySkipped = pending.filter((stage) =>
-          stage.needs.some((dep) => {
-            const s = state.stageStates[dep]?.status;
-            return s === "failed" || s === "skipped";
-          }),
-        );
-        if (newlySkipped.length > 0) {
-          for (const stage of newlySkipped) {
-            const failedDeps = stage.needs.filter((dep) => {
+      if (haltDispatch === undefined) {
+        const ready = pending.filter((stage) => !inFlight.has(stage.id) && stage.needs.every((dependency) => state.stageStates[dependency]?.status === "completed"));
+        const running = [...inFlight.keys()].map((id) => stageById.get(id)).filter((stage): stage is TripStage => Boolean(stage));
+        for (const stage of selectDispatchable(ready, running, limit)) dispatch(stage);
+        // Skipped-dependency marking and deadlock detection are only meaningful
+        // when nothing is in flight; a transiently empty ready set while stages
+        // run is not a deadlock.
+        if (!inFlight.size && !ready.length) {
+          const newlySkipped = pending.filter((stage) =>
+            stage.needs.some((dep) => {
               const s = state.stageStates[dep]?.status;
               return s === "failed" || s === "skipped";
-            });
-            const ss = requiredStageState(state, stage.id);
-            ss.status = "skipped";
-            ss.schedulingReason = { kind: "waiting_on_failed_dependency", dependencyId: failedDeps[0]! };
-            ss.blockedBy = failedDeps;
-            await emit(context, "stage.skipped", `Stage ${stage.id} skipped: dependency failed (${failedDeps.join(", ")})`, stage.id);
+            }),
+          );
+          if (newlySkipped.length > 0) {
+            for (const stage of newlySkipped) {
+              const failedDeps = stage.needs.filter((dep) => {
+                const s = state.stageStates[dep]?.status;
+                return s === "failed" || s === "skipped";
+              });
+              const ss = requiredStageState(state, stage.id);
+              ss.status = "skipped";
+              ss.schedulingReason = { kind: "waiting_on_failed_dependency", dependencyId: failedDeps[0]! };
+              ss.blockedBy = failedDeps;
+              await emit(context, "stage.skipped", `Stage ${stage.id} skipped: dependency failed (${failedDeps.join(", ")})`, stage.id);
+            }
+            await writeRunState(context.repositoryRoot, context.state);
+            continue;
           }
-          await writeRunState(context.repositoryRoot, context.state);
-          continue;
+          // Defensive: validation rejects dependency cycles, so this is reachable
+          // only through a corrupted run state.
+          const blockers = pending.map((stage) => `${stage.id} waits for ${stage.needs.filter((dep) => state.stageStates[dep]?.status !== "completed").join(", ")}`);
+          state.status = "failed";
+          state.pauseKind = "blocked";
+          state.pauseReason = `Deadlock: no runnable stage remains:\n${blockers.join("\n")}`;
+          await emit(context, "run.failed", state.pauseReason);
+          await writeRunState(context.repositoryRoot, state);
+          return state;
         }
-        // True deadlock — no stages can be scheduled
-        const blockers = pending.map((stage) => `${stage.id} waits for ${stage.needs.filter((dep) => state.stageStates[dep]?.status !== "completed").join(", ")}`);
-        state.status = "failed";
-        state.pauseKind = "blocked";
-        state.pauseReason = `Deadlock: no runnable stage remains:\n${blockers.join("\n")}`;
-        await emit(context, "run.failed", state.pauseReason);
-        await writeRunState(context.repositoryRoot, state);
-        return state;
       }
-      const serial = ready.find((stage) => stage.isolation === "same-checkout" || stage.type === "integration");
-      if (serial) {
-        await executeStage(context, serial);
-      } else {
-        const limit = context.manifest.settings?.maxParallel ?? 4;
-        for (let index = 0; index < ready.length; index += limit) {
-          const batch = ready.slice(index, index + limit);
-          const outcomes = await Promise.allSettled(batch.map(async (stage) => await executeStage(context, stage)));
-          const rejection = outcomes.find((outcome) => outcome.status === "rejected");
-          if (rejection?.status === "rejected") throw rejection.reason;
-        }
+      if (!inFlight.size) continue;
+      await Promise.race(inFlight.values());
+      if (failures.length) {
+        // Another worker owns the run: return the durable state now. Siblings
+        // that keep running cannot overwrite it, because writeRunState rejects a
+        // stale lease generation.
+        const superseded = failures.find((error) => error instanceof LeaseSuperseded || error instanceof LeaseGenerationMismatchError);
+        if (superseded) throw superseded;
+        haltDispatch ??= failures.shift();
       }
       await writeRunState(context.repositoryRoot, state);
     }
@@ -434,6 +455,34 @@ async function executeLoop(context: RunnerContext): Promise<RunState> {
     await writeRunState(context.repositoryRoot, state);
     return state;
   }
+}
+
+/** Same-checkout and integration stages must run alone: they mutate the shared checkout. */
+export function isExclusiveStage(stage: TripStage): boolean {
+  return stage.isolation === "same-checkout" || stage.type === "integration";
+}
+
+/**
+ * Pool admission (nx's `parallelism: false` rule). While an exclusive stage
+ * runs nothing else starts; an exclusive stage starts only when the pool is
+ * empty; everything else fills the remaining slots in ready order. An
+ * exclusive stage that must wait does not block later non-exclusive stages
+ * from taking slots, so worktree writers backfill around it.
+ */
+export function selectDispatchable(ready: TripStage[], running: TripStage[], limit: number): TripStage[] {
+  if (running.some(isExclusiveStage)) return [];
+  const selected: TripStage[] = [];
+  let occupied = running.length;
+  for (const stage of ready) {
+    if (occupied >= limit) break;
+    if (isExclusiveStage(stage)) {
+      if (occupied === 0) return [stage];
+      continue;
+    }
+    selected.push(stage);
+    occupied += 1;
+  }
+  return selected;
 }
 
 async function executeStage(context: RunnerContext, stage: TripStage): Promise<void> {

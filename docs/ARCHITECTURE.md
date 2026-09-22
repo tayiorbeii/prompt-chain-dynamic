@@ -24,6 +24,10 @@ pending → preparing → implementing → validating ──(completion claim)�
 
 A DAG models macro dependencies. Repair and decision behavior is not represented as additional DAG nodes.
 
+#### Scheduling
+
+Ready stages are dispatched into a bounded pool of `settings.maxParallel` slots and the loop re-evaluates readiness on every completion, so a finished worktree writer is replaced immediately rather than after its whole batch. Same-checkout and integration stages are *exclusive*: one starts only when nothing is in flight, and while it runs nothing else starts, because both mutate the shared checkout. Worktree writers backfill around a waiting exclusive stage. Skipped-dependency marking and deadlock detection run only when the pool is empty; a transiently empty ready set while stages run is not a deadlock (dependency cycles are rejected by manifest validation, so the deadlock branch is defensive). A pause, abort or stage failure stops new dispatch and waits for in-flight siblings to reach their durable boundary before propagating; a superseded lease returns the durable state immediately, since stale writers cannot overwrite it.
+
 ### pi-dynamic-workflows
 
 `DynamicWorkflowBackend` calls `WorkflowAgent` with a role-specific TypeBox schema, model tier, tools, working directory, and persisted session name. It supplies reasoning execution, not authorization. Supported history and streaming-usage callbacks report activity to the runtime; final usage reporting is preserved. No wall-clock deadline is passed to the backend. The runtime awaits the original agent or validation result, emitting advisory inactivity warnings (live and durable) without cancellation, failure classification, or replacement. Legacy timeout settings now select warning intervals, and activity resets the warning timer. Lease/control-plane bounds are independent and unchanged.

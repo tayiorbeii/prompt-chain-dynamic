@@ -464,3 +464,160 @@ test("abort immediately finalizes a running state whose worker lease expired", a
   assert.equal(aborted.stageStates.research?.status, "paused");
   assert.match(aborted.pauseReason ?? "", /worker lease had expired/);
 });
+
+// --- Slice 7: pool scheduler with exclusive stages ---
+
+import { isExclusiveStage, selectDispatchable } from "../src/runner.ts";
+import { loadRunState } from "../src/store.ts";
+import { readFile } from "node:fs/promises";
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function poolStage(id: string, isolation: "worktree" | "same-checkout" | "readonly", type: "implementation" | "integration" | "review" = "implementation"): TripManifest["stages"][number] {
+  return { id, type, needs: [], isolation, prompt: id };
+}
+
+test("selectDispatchable fills free slots, lets exclusive stages run only alone, and backfills around a waiting exclusive stage", () => {
+  const a = poolStage("a", "worktree");
+  const b = poolStage("b", "worktree");
+  const c = poolStage("c", "worktree");
+  const s = poolStage("s", "same-checkout");
+  const i = poolStage("i", "same-checkout", "integration");
+  assert.equal(isExclusiveStage(s), true);
+  assert.equal(isExclusiveStage(i), true);
+  assert.equal(isExclusiveStage(a), false);
+  assert.deepEqual(selectDispatchable([a, b, c], [], 2).map((stage) => stage.id), ["a", "b"], "bounded by the limit");
+  assert.deepEqual(selectDispatchable([c], [a], 2).map((stage) => stage.id), ["c"], "backfills one freed slot");
+  assert.deepEqual(selectDispatchable([s], [], 2).map((stage) => stage.id), ["s"], "an exclusive stage starts on an empty pool");
+  assert.deepEqual(selectDispatchable([s, b], [a], 2).map((stage) => stage.id), ["b"], "a waiting exclusive stage does not block backfill");
+  assert.deepEqual(selectDispatchable([a, b], [s], 2), [], "nothing starts while an exclusive stage runs");
+  assert.deepEqual(selectDispatchable([s, i], [], 4).map((stage) => stage.id), ["s"], "only one exclusive stage at a time");
+});
+
+async function poolManifest(repository: string, writers: Array<{ id: string; needs?: string[]; required?: boolean }>, maxParallel: number, options: { extraStages?: TripManifest["stages"]; reviewRequired?: boolean; consecutiveFailureOverride?: number } = {}): Promise<string> {
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Pool",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      maxParallel,
+      reviewPolicy: { required: options.reviewRequired ?? false, reviewerCount: 1, maxRepairRounds: 1, malformedVerdict: "continue", requireFreshClosureReviewer: false },
+      ...(options.consecutiveFailureOverride ? { continuationPolicy: { consecutiveFailureOverride: options.consecutiveFailureOverride } } : {}),
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      ...writers.map((writer) => ({ id: writer.id, type: "implementation" as const, needs: writer.needs ?? ["research"], isolation: "worktree" as const, prompt: writer.id, allowedPaths: [`src/${writer.id}.ts`], claimedPaths: [`src/${writer.id}.ts`], ...(writer.required === false ? { required: false } : {}) })),
+      ...(options.extraStages ?? []),
+      { id: "integrate", type: "integration", needs: writers.map((writer) => writer.id), isolation: "same-checkout", integrationStrategy: "worktree-fan-in", prompt: "Integrate", allowedPaths: ["src/**"] },
+    ],
+  };
+  const manifestPath = path.join(os.tmpdir(), `pool-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  return manifestPath;
+}
+
+test("the pool caps in-flight writers and backfills as soon as one finishes", async () => {
+  const repository = await createRepository();
+  const durations: Record<string, number> = { a: 50, b: 2500, c: 50 };
+  const started: Record<string, number> = {};
+  const finished: Record<string, number> = {};
+  let inFlight = 0;
+  let maxInFlight = 0;
+  class TimedBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Research complete.");
+      if (request.role === "implementation") {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        started[request.stageId] = Date.now();
+        await sleep(durations[request.stageId] ?? 50);
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", `${request.stageId}.ts`), `export const ${request.stageId} = 1;\n`);
+        finished[request.stageId] = Date.now();
+        inFlight -= 1;
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      return result("<status>complete</status><risk>low</risk><rationale>OK.</rationale>");
+    }
+  }
+  const manifestPath = await poolManifest(repository, [{ id: "a" }, { id: "b" }, { id: "c" }], 2);
+  const state = await runManifestFile({ manifestPath, backend: new TimedBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(maxInFlight, 2, "never more than maxParallel writers in flight");
+  assert.ok(started.c !== undefined && finished.a !== undefined && finished.b !== undefined);
+  assert.ok(started.c! >= finished.a! - 5, "c starts after a finishes");
+  assert.ok(started.c! < finished.b!, "c starts before b finishes: the pool backfills instead of waiting for the batch");
+  for (const id of ["a", "b", "c"]) assert.equal(state.stageStates[id]?.attempts.length, 1, `${id} persisted its attempt record`);
+});
+
+test("a pause raised by one writer waits for its in-flight sibling and persists the sibling's attempt", async () => {
+  const repository = await createRepository();
+  class PausingBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Research complete.");
+      if (request.stageId === "a" && (request.role === "implementation" || request.role === "repair")) {
+        await sleep(1500);
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "a.ts"), "export const a = 1;\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.stageId === "a" && request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+      if (request.stageId === "b" && (request.role === "implementation" || request.role === "repair")) {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "b.ts"), "export const b = 1;\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.stageId === "b" && request.role === "review") {
+        // Reviewer churn on b exhausts its rail while a is still running, which pauses the run.
+        return result("<status>continue</status><risk>medium</risk><rationale>Not yet.</rationale><finding><severity>major</severity><blocking>true</blocking><summary>b is wrong</summary><evidence>src/b.ts</evidence></finding>");
+      }
+      return result("<status>complete</status><risk>low</risk><rationale>OK.</rationale>");
+    }
+  }
+  const manifestPath = await poolManifest(repository, [{ id: "a" }, { id: "b" }], 2, { reviewRequired: true, consecutiveFailureOverride: 2 });
+  const state = await runManifestFile({ manifestPath, backend: new PausingBackend() });
+  assert.equal(state.status, "paused", state.pauseReason);
+  assert.equal(state.pauseKind, "review_blocked");
+  const durable = await loadRunState(repository, state.id);
+  assert.equal(durable.stageStates.a?.status, "completed", "the sibling reached its durable boundary before the pause propagated");
+  assert.equal(durable.stageStates.a?.attempts.length, 1);
+  assert.equal(durable.stageStates.a?.attempts[0]?.status, "keep");
+});
+
+test("a dependent of a failed optional writer is skipped only after in-flight siblings finish", async () => {
+  const repository = await createRepository();
+  class FailingBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Research complete.");
+      if (request.stageId === "a" && request.role === "implementation") {
+        // A direct agent commit is a safety-boundary failure; on an optional stage it fails the stage without pausing the run.
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "a.ts"), "export const a = 1;\n");
+        await git(request.cwd, ["add", "src/a.ts"]);
+        await git(request.cwd, ["-c", "user.email=agent@example.com", "-c", "user.name=Agent", "commit", "-m", "agent commit"]);
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.stageId === "b" && request.role === "implementation") {
+        await sleep(250);
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "b.ts"), "export const b = 1;\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      return result("<status>complete</status><risk>low</risk><rationale>OK.</rationale>");
+    }
+  }
+  const manifestPath = await poolManifest(repository, [{ id: "a", required: false }, { id: "b" }], 2, { extraStages: [{ id: "d", type: "review", needs: ["a"], isolation: "readonly", prompt: "Review a" }] });
+  const state = await runManifestFile({ manifestPath, backend: new FailingBackend() });
+  assert.equal(state.stageStates.a?.status, "failed");
+  assert.equal(state.stageStates.d?.status, "skipped");
+  assert.equal(state.stageStates.b?.status, "completed");
+  const events = (await readFile(path.join(repository, ".pi", "prompt-chain-hybrid", "runs", state.id, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; stageId?: string });
+  const bCompleted = events.findIndex((event) => event.type === "stage.completed" && event.stageId === "b");
+  const dSkipped = events.findIndex((event) => event.type === "stage.skipped" && event.stageId === "d");
+  assert.ok(bCompleted >= 0 && dSkipped >= 0);
+  assert.ok(dSkipped > bCompleted, "skip marking waited for the pool to drain");
+});

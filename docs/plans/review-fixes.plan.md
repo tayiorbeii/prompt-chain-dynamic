@@ -481,7 +481,7 @@ Replace one-stage-per-iteration and chunked batches with a bounded pool.
 - With three ready worktree writers and a maximum concurrency of two, a backend that records overlapping calls observes at most two writers in flight, and the third starts as soon as the first finishes rather than after both.
 - A same-checkout stage that becomes ready while worktree writers are in flight starts only after they finish, and no worktree writer starts while it runs.
 - A pause raised by one in-flight writer leaves a sibling writer's attempt record persisted before the run pauses, and a superseded lease observed by one writer ends the loop without persisting the sibling's later writes.
-- A new test with two stages that need each other reports a deadlock only after the running stages have finished, and existing scheduler tests for skipped dependencies and lease reclaim remain green.
+- A stage whose dependency failed is marked skipped only after the in-flight siblings have finished (dependency cycles are rejected by manifest validation, so the deadlock branch stays defensive and untested), and existing scheduler tests for skipped dependencies and lease reclaim remain green.
 
 **Targeted Validation**:
 ```sh
