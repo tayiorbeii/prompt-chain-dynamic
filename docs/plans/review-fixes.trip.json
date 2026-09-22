@@ -1,0 +1,743 @@
+{
+  "schemaVersion": 1,
+  "name": "Review Fixes: Convergent Repair Loop, Honest Compiler, Real Parallelism",
+  "workingDirectory": "../..",
+  "metadata": {
+    "generator": {
+      "name": "prompt-chain-plan-compiler",
+      "version": "0.1.0"
+    },
+    "sourceGuide": "docs/plans/review-fixes.plan.md",
+    "generatedAt": "2026-09-22T22:25:30.849Z",
+    "requestedMode": "auto",
+    "selectedTopology": "same-checkout-serial",
+    "topologyReasons": [
+      "Slice 1 — The fence is the validation contract does not explicitly declare parallel safety",
+      "Slice 1 — The fence is the validation contract: high-risk shared path: package-lock.json",
+      "Slice 1 — The fence is the validation contract: high-risk shared path: package.json",
+      "Slice 2 — Worker verdicts stop minting findings does not explicitly declare parallel safety",
+      "Slice 2 — Worker verdicts stop minting findings: high-risk shared path: src/types.ts",
+      "Slice 2 — Worker verdicts stop minting findings declares dependencies: slice-1-the-fence-is-the-validation-contract",
+      "Slice 3 — Validate every attempt and review completion claims does not explicitly declare parallel safety",
+      "Slice 3 — Validate every attempt and review completion claims declares dependencies: slice-2-worker-verdicts-stop-minting-findings",
+      "Slice 4 — Stuck detection and the worker reflection cap does not explicitly declare parallel safety",
+      "Slice 4 — Stuck detection and the worker reflection cap: high-risk shared path: src/types.ts",
+      "Slice 4 — Stuck detection and the worker reflection cap declares dependencies: slice-3-validate-every-attempt-and-review-completion-claims",
+      "Slice 5 — Fresh closure reviewers does not explicitly declare parallel safety",
+      "Slice 5 — Fresh closure reviewers: high-risk shared path: src/types.ts",
+      "Slice 5 — Fresh closure reviewers declares dependencies: slice-4-stuck-detection-and-the-worker-reflection-cap",
+      "Slice 6 — Wave-aware compilation behind a flag does not explicitly declare parallel safety",
+      "Slice 6 — Wave-aware compilation behind a flag: high-risk shared path: src/types.ts",
+      "Slice 6 — Wave-aware compilation behind a flag declares dependencies: slice-5-fresh-closure-reviewers",
+      "Slice 7 — Pool scheduler with exclusive stages does not explicitly declare parallel safety",
+      "Slice 7 — Pool scheduler with exclusive stages: high-risk shared path: src/types.ts",
+      "Slice 7 — Pool scheduler with exclusive stages declares dependencies: slice-6-wave-aware-compilation-behind-a-flag",
+      "Slice 8 — Multi-wave execution in the runtime does not explicitly declare parallel safety",
+      "Slice 8 — Multi-wave execution in the runtime: high-risk shared path: src/types.ts",
+      "Slice 8 — Multi-wave execution in the runtime declares dependencies: slice-7-pool-scheduler-with-exclusive-stages",
+      "Slice 9 — Activity clock and bounded reclaim does not explicitly declare parallel safety",
+      "Slice 9 — Activity clock and bounded reclaim: high-risk shared path: src/types.ts",
+      "Slice 9 — Activity clock and bounded reclaim declares dependencies: slice-8-multi-wave-execution-in-the-runtime",
+      "claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 2 — Worker verdicts stop minting findings:README.md",
+      "claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 4 — Stuck detection and the worker reflection cap:README.md",
+      "claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 5 — Fresh closure reviewers:README.md",
+      "claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "claims overlap: Slice 1 — The fence is the validation contract:bin/trip-compile.ts and Slice 6 — Wave-aware compilation behind a flag:bin/trip-compile.ts",
+      "claims overlap: Slice 1 — The fence is the validation contract:src/compiler.ts and Slice 6 — Wave-aware compilation behind a flag:src/compiler.ts",
+      "claims overlap: Slice 1 — The fence is the validation contract:tests/compiler.test.ts and Slice 6 — Wave-aware compilation behind a flag:tests/compiler.test.ts",
+      "claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "claims overlap: Slice 1 — The fence is the validation contract:src/compiler.ts and Slice 8 — Multi-wave execution in the runtime:src/compiler.ts",
+      "claims overlap: Slice 1 — The fence is the validation contract:tests/compiler.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/compiler.test.ts",
+      "claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/review.ts and Slice 3 — Validate every attempt and review completion claims:src/review.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 3 — Validate every attempt and review completion claims:src/runner.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 4 — Stuck detection and the worker reflection cap:README.md",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 4 — Stuck detection and the worker reflection cap:src/types.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 5 — Fresh closure reviewers:README.md",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 5 — Fresh closure reviewers:src/runner.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 5 — Fresh closure reviewers:src/types.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 5 — Fresh closure reviewers:tests/runner.test.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 6 — Wave-aware compilation behind a flag:src/types.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/store.ts and Slice 9 — Activity clock and bounded reclaim:src/store.ts",
+      "claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 5 — Fresh closure reviewers:src/runner.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 5 — Fresh closure reviewers:tests/runner.test.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:docs/ARCHITECTURE.md and Slice 7 — Pool scheduler with exclusive stages:docs/ARCHITECTURE.md",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:docs/ARCHITECTURE.md and Slice 8 — Multi-wave execution in the runtime:docs/ARCHITECTURE.md",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 5 — Fresh closure reviewers:README.md",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 5 — Fresh closure reviewers:src/runner.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 5 — Fresh closure reviewers:src/types.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts and Slice 5 — Fresh closure reviewers:tests/runner.test.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 6 — Wave-aware compilation behind a flag:src/types.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/validation.ts and Slice 6 — Wave-aware compilation behind a flag:src/validation.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/status.ts and Slice 9 — Activity clock and bounded reclaim:src/status.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/validation.ts and Slice 9 — Activity clock and bounded reclaim:src/validation.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 6 — Wave-aware compilation behind a flag:src/types.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/compiler.ts and Slice 8 — Multi-wave execution in the runtime:src/compiler.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:tests/compiler.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/compiler.test.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/validation.ts and Slice 9 — Activity clock and bounded reclaim:src/validation.ts",
+      "claims overlap: Slice 7 — Pool scheduler with exclusive stages:docs/ARCHITECTURE.md and Slice 8 — Multi-wave execution in the runtime:docs/ARCHITECTURE.md",
+      "claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "claims overlap: Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "claims overlap: Slice 7 — Pool scheduler with exclusive stages:tests/scheduler.test.ts and Slice 9 — Activity clock and bounded reclaim:tests/scheduler.test.ts",
+      "claims overlap: Slice 8 — Multi-wave execution in the runtime:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "claims overlap: Slice 8 — Multi-wave execution in the runtime:src/reaper.ts and Slice 9 — Activity clock and bounded reclaim:src/reaper.ts",
+      "claims overlap: Slice 8 — Multi-wave execution in the runtime:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "claims overlap: Slice 8 — Multi-wave execution in the runtime:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "claims overlap: Slice 8 — Multi-wave execution in the runtime:tests/liveness.test.ts and Slice 9 — Activity clock and bounded reclaim:tests/liveness.test.ts"
+    ],
+    "authorWarnings": [
+      "serialized: Slice 1 — The fence is the validation contract does not explicitly declare parallel safety",
+      "serialized: Slice 1 — The fence is the validation contract: high-risk shared path: package-lock.json",
+      "serialized: Slice 1 — The fence is the validation contract: high-risk shared path: package.json",
+      "serialized: Slice 2 — Worker verdicts stop minting findings does not explicitly declare parallel safety",
+      "serialized: Slice 2 — Worker verdicts stop minting findings: high-risk shared path: src/types.ts",
+      "serialized: Slice 2 — Worker verdicts stop minting findings declares dependencies: slice-1-the-fence-is-the-validation-contract",
+      "serialized: Slice 3 — Validate every attempt and review completion claims does not explicitly declare parallel safety",
+      "serialized: Slice 3 — Validate every attempt and review completion claims declares dependencies: slice-2-worker-verdicts-stop-minting-findings",
+      "serialized: Slice 4 — Stuck detection and the worker reflection cap does not explicitly declare parallel safety",
+      "serialized: Slice 4 — Stuck detection and the worker reflection cap: high-risk shared path: src/types.ts",
+      "serialized: Slice 4 — Stuck detection and the worker reflection cap declares dependencies: slice-3-validate-every-attempt-and-review-completion-claims",
+      "serialized: Slice 5 — Fresh closure reviewers does not explicitly declare parallel safety",
+      "serialized: Slice 5 — Fresh closure reviewers: high-risk shared path: src/types.ts",
+      "serialized: Slice 5 — Fresh closure reviewers declares dependencies: slice-4-stuck-detection-and-the-worker-reflection-cap",
+      "serialized: Slice 6 — Wave-aware compilation behind a flag does not explicitly declare parallel safety",
+      "serialized: Slice 6 — Wave-aware compilation behind a flag: high-risk shared path: src/types.ts",
+      "serialized: Slice 6 — Wave-aware compilation behind a flag declares dependencies: slice-5-fresh-closure-reviewers",
+      "serialized: Slice 7 — Pool scheduler with exclusive stages does not explicitly declare parallel safety",
+      "serialized: Slice 7 — Pool scheduler with exclusive stages: high-risk shared path: src/types.ts",
+      "serialized: Slice 7 — Pool scheduler with exclusive stages declares dependencies: slice-6-wave-aware-compilation-behind-a-flag",
+      "serialized: Slice 8 — Multi-wave execution in the runtime does not explicitly declare parallel safety",
+      "serialized: Slice 8 — Multi-wave execution in the runtime: high-risk shared path: src/types.ts",
+      "serialized: Slice 8 — Multi-wave execution in the runtime declares dependencies: slice-7-pool-scheduler-with-exclusive-stages",
+      "serialized: Slice 9 — Activity clock and bounded reclaim does not explicitly declare parallel safety",
+      "serialized: Slice 9 — Activity clock and bounded reclaim: high-risk shared path: src/types.ts",
+      "serialized: Slice 9 — Activity clock and bounded reclaim declares dependencies: slice-8-multi-wave-execution-in-the-runtime",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 2 — Worker verdicts stop minting findings:README.md",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 4 — Stuck detection and the worker reflection cap:README.md",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 5 — Fresh closure reviewers:README.md",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:bin/trip-compile.ts and Slice 6 — Wave-aware compilation behind a flag:bin/trip-compile.ts",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:src/compiler.ts and Slice 6 — Wave-aware compilation behind a flag:src/compiler.ts",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:tests/compiler.test.ts and Slice 6 — Wave-aware compilation behind a flag:tests/compiler.test.ts",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:src/compiler.ts and Slice 8 — Multi-wave execution in the runtime:src/compiler.ts",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:tests/compiler.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/compiler.test.ts",
+      "serialized: claims overlap: Slice 1 — The fence is the validation contract:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/review.ts and Slice 3 — Validate every attempt and review completion claims:src/review.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 3 — Validate every attempt and review completion claims:src/runner.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 4 — Stuck detection and the worker reflection cap:README.md",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 4 — Stuck detection and the worker reflection cap:src/types.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 5 — Fresh closure reviewers:README.md",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 5 — Fresh closure reviewers:src/runner.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 5 — Fresh closure reviewers:src/types.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 5 — Fresh closure reviewers:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 6 — Wave-aware compilation behind a flag:src/types.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/store.ts and Slice 9 — Activity clock and bounded reclaim:src/store.ts",
+      "serialized: claims overlap: Slice 2 — Worker verdicts stop minting findings:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 5 — Fresh closure reviewers:src/runner.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 5 — Fresh closure reviewers:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:docs/ARCHITECTURE.md and Slice 7 — Pool scheduler with exclusive stages:docs/ARCHITECTURE.md",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:docs/ARCHITECTURE.md and Slice 8 — Multi-wave execution in the runtime:docs/ARCHITECTURE.md",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 3 — Validate every attempt and review completion claims:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 5 — Fresh closure reviewers:README.md",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 5 — Fresh closure reviewers:src/runner.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 5 — Fresh closure reviewers:src/types.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts and Slice 5 — Fresh closure reviewers:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 6 — Wave-aware compilation behind a flag:src/types.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/validation.ts and Slice 6 — Wave-aware compilation behind a flag:src/validation.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/status.ts and Slice 9 — Activity clock and bounded reclaim:src/status.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "serialized: claims overlap: Slice 4 — Stuck detection and the worker reflection cap:src/validation.ts and Slice 9 — Activity clock and bounded reclaim:src/validation.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:README.md and Slice 6 — Wave-aware compilation behind a flag:README.md",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 6 — Wave-aware compilation behind a flag:src/runner.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 6 — Wave-aware compilation behind a flag:src/types.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:tests/runner.test.ts and Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "serialized: claims overlap: Slice 5 — Fresh closure reviewers:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/runner.ts and Slice 7 — Pool scheduler with exclusive stages:src/runner.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/types.ts and Slice 7 — Pool scheduler with exclusive stages:src/types.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:README.md and Slice 8 — Multi-wave execution in the runtime:README.md",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/compiler.ts and Slice 8 — Multi-wave execution in the runtime:src/compiler.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:tests/compiler.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/compiler.test.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "serialized: claims overlap: Slice 6 — Wave-aware compilation behind a flag:src/validation.ts and Slice 9 — Activity clock and bounded reclaim:src/validation.ts",
+      "serialized: claims overlap: Slice 7 — Pool scheduler with exclusive stages:docs/ARCHITECTURE.md and Slice 8 — Multi-wave execution in the runtime:docs/ARCHITECTURE.md",
+      "serialized: claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/runner.ts and Slice 8 — Multi-wave execution in the runtime:src/runner.ts",
+      "serialized: claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/types.ts and Slice 8 — Multi-wave execution in the runtime:src/types.ts",
+      "serialized: claims overlap: Slice 7 — Pool scheduler with exclusive stages:tests/runner.test.ts and Slice 8 — Multi-wave execution in the runtime:tests/runner.test.ts",
+      "serialized: claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "serialized: claims overlap: Slice 7 — Pool scheduler with exclusive stages:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "serialized: claims overlap: Slice 7 — Pool scheduler with exclusive stages:tests/scheduler.test.ts and Slice 9 — Activity clock and bounded reclaim:tests/scheduler.test.ts",
+      "serialized: claims overlap: Slice 8 — Multi-wave execution in the runtime:README.md and Slice 9 — Activity clock and bounded reclaim:README.md",
+      "serialized: claims overlap: Slice 8 — Multi-wave execution in the runtime:src/reaper.ts and Slice 9 — Activity clock and bounded reclaim:src/reaper.ts",
+      "serialized: claims overlap: Slice 8 — Multi-wave execution in the runtime:src/runner.ts and Slice 9 — Activity clock and bounded reclaim:src/runner.ts",
+      "serialized: claims overlap: Slice 8 — Multi-wave execution in the runtime:src/types.ts and Slice 9 — Activity clock and bounded reclaim:src/types.ts",
+      "serialized: claims overlap: Slice 8 — Multi-wave execution in the runtime:tests/liveness.test.ts and Slice 9 — Activity clock and bounded reclaim:tests/liveness.test.ts"
+    ],
+    "unresolvedSections": [],
+    "sourcePlanHash": "sha256:0efce37db0f7e9a85b2211052c9e31d303700a0c5b6a78d4852c6e1c18f16cc3",
+    "policyHashes": {},
+    "pathPolicy": "permissive",
+    "runtime": {
+      "engine": "pi-dynamic-workflows",
+      "version": "3.0.0"
+    },
+    "contractHash": "sha256:aa4df78177369435c627321da1009c22a1351d336df99e932dbae8f795bb1c74"
+  },
+  "settings": {
+    "maxParallel": 4,
+    "failFast": false,
+    "autoCommit": true,
+    "sessionTimeoutMs": 1800000,
+    "commandTimeoutMs": 900000,
+    "decisionPolicy": {
+      "mode": "agent",
+      "maxDecisionRounds": 2,
+      "requireBestEffortDecision": true,
+      "prepareHumanRecommendation": true
+    },
+    "reviewPolicy": {
+      "required": true,
+      "reviewerCount": 2,
+      "maxRepairRounds": 4,
+      "malformedVerdict": "continue",
+      "requireFreshClosureReviewer": true
+    },
+    "defaultValidationCommands": [],
+    "finalValidationCommands": [
+      "npm run check",
+      "npm test"
+    ],
+    "continuationPolicy": {
+      "reaperEnabled": true,
+      "reaperPollIntervalMs": 5000,
+      "heartbeatStopTimeoutMs": 5000,
+      "bestEffortCompletion": false
+    }
+  },
+  "stages": [
+    {
+      "id": "research",
+      "type": "review",
+      "needs": [],
+      "isolation": "readonly",
+      "prompt": "Read the approved plan at docs/plans/review-fixes.plan.md, docs/VISION.md, docs/ARCHI.md, and repository instructions. Confirm the implementation slices, dependencies, risks, and path contracts. Do not edit files. Return a concise context handoff.",
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "outputs": [],
+      "required": true,
+      "parallel": false,
+      "allowedPaths": [],
+      "claimedPaths": [],
+      "validationCommands": []
+    },
+    {
+      "id": "implement-slice-1-the-fence-is-the-validation-contract",
+      "type": "implementation",
+      "needs": [
+        "research"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 1 — The fence is the validation contract\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- bin/**\n- tests/**\n- skills/**\n- package.json\n- package-lock.json\n- README.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- README.md\n- bin/trip-compile.ts\n- package-lock.json\n- package.json\n- skills/prompt-chain-plan/SKILL.md\n- src/compiler.ts\n- tests/compiler.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- A plan fence containing a TypeScript compiler invocation and a Node script invocation compiles to a stage whose validation commands equal those two lines in order, and a backticked command-like phrase in that slice's acceptance criteria does not appear in the stage's commands.\n- A slice with a Targeted Validation label and an empty fence fails compilation with a message naming the slice, and compiles with a warning when unresolved slices are allowed.\n- A slice with no Targeted Validation label still yields the loose-scan command the existing fixture expects, plus an author warning.\n- A Files label whose entries are wrapped in backticks produces claims without backticks and validates against directory-glob allowed paths.\n- The package declares the TypeScript compiler as a development dependency and the check script resolves it from the local install.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/compiler.ts, bin/trip-compile.ts, package.json, package-lock.json, tests/compiler.test.ts, skills/prompt-chain-plan/SKILL.md, README.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- bin/**\n- tests/**\n- skills/**\n- package.json\n- package-lock.json\n- README.md\n\nStop dropping declared validation commands, fix claim parsing, and fail loudly\nwhen a declaration is empty. Compiler-only; no runtime change.\n\n- Split `extractCommands` into `extractFenceCommands(body)` and\n  `extractLooseCommands(body)`. The fence extractor finds each\n  `Targeted Validation` label and the `sh|bash|shell|zsh` fence that follows\n  it, strips a leading `$ ` or `> `, skips blank lines and lines starting with\n  `#`, and returns the remaining lines verbatim and in order. The loose\n  extractor keeps today's allowlist for command-like lines.\n- Precedence: when a slice body contains at least one Targeted Validation\n  fence, its commands are the fence commands only. When it contains none, the\n  loose extractor is the fallback and the slice compiles with an author\n  warning naming it. A slice with a Targeted Validation label whose fence\n  yields zero commands is a compile error naming the slice, downgraded to an\n  author warning under `--allow-unresolved`.\n- `discoverFinalValidationCommands` returns the deduped union of every\n  Targeted Validation fence in the document. Only when the document has no\n  fence at all does it fall back to the loose scan, and only then to package\n  scripts, preserving today's fallback order after the fence step.\n- Fix claim extraction so Files entries wrapped in backticks yield bare paths.\n  Today the label parser keeps the backticks, producing a second claim no\n  allowed path can cover, which is why this plan writes Files without them.\n- Add `typescript` as a devDependency at the major version the checkout\n  resolves globally, so the check script runs inside the package.\n- Plan skill: rewrite the command-extraction section to state the fence rule,\n  keep the loose-scan trap advice for slices without a fence, and restore the\n  backticked Files form in the template.\n\n**Acceptance Criteria**:\n- A plan fence containing a TypeScript compiler invocation and a Node script invocation compiles to a stage whose validation commands equal those two lines in order, and a backticked command-like phrase in that slice's acceptance criteria does not appear in the stage's commands.\n- A slice with a Targeted Validation label and an empty fence fails compilation with a message naming the slice, and compiles with a warning when unresolved slices are allowed.\n- A slice with no Targeted Validation label still yields the loose-scan command the existing fixture expects, plus an author warning.\n- A Files label whose entries are wrapped in backticks produces claims without backticks and validates against directory-glob allowed paths.\n- The package declares the TypeScript compiler as a development dependency and the check script resolves it from the local install.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "README.md",
+        "bin/**",
+        "package-lock.json",
+        "package.json",
+        "skills/**",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "README.md",
+        "bin/trip-compile.ts",
+        "package-lock.json",
+        "package.json",
+        "skills/prompt-chain-plan/SKILL.md",
+        "src/compiler.ts",
+        "tests/compiler.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-2-worker-verdicts-stop-minting-findings",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-1-the-fence-is-the-validation-contract"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 2 — Worker verdicts stop minting findings\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- tests/**\n- README.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- README.md\n- src/review.ts\n- src/runner.ts\n- src/store.ts\n- src/types.ts\n- tests/review.test.ts\n- tests/runner.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- A backend whose worker returns continue three times with prose rationale and embedded finding tags, then complete, leaves zero findings on the stage and the stage completes.\n- Loading a run state file that contains a legacy worker-sourced finding succeeds and reports that finding as resolved.\n- The next repair prompt after a worker continue contains the worker's missing items under REQUIRED ACTION and contains no OPEN BLOCKING FINDINGS entry derived from worker prose.\n- The type checker rejects code that constructs a finding with the worker source.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/review.ts, src/runner.ts, src/types.ts, src/store.ts, tests/review.test.ts, tests/runner.test.ts, README.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- tests/**\n- README.md\n\nTake the worker's return out of the finding pipeline entirely.\n\n- Add `workerDirection(review)` to `src/review.ts`: returns the joined\n  `missingItems` when present, else the worker's `recommendedFollowupPrompt`,\n  else a fixed instruction to address open blocking findings. It never\n  produces a `Finding`.\n- In `runWriterStage`, the non-complete worker branch calls `workerDirection`\n  and no longer calls `handleNonCompleteVerdict` or `findingsFromReview`.\n  Findings a worker emits inside its own response are ignored; a reviewer must\n  raise them.\n- Narrow `Finding.source` to\n  `deterministic-validation | independent-review | integration-review | operator`\n  and narrow the `source` parameter of `handleNonCompleteVerdict` to match.\n- In `loadRunState`, accept a legacy `worker` value and mark that finding\n  `resolved` with a `resolutionEvidence.rationale` of \"legacy worker\n  self-report; not evidence\".\n- Update the repair prompt's FINAL RESPONSE guidance: `missingItems` is what the\n  runtime acts on; `continue` with no missing items is treated as a request for\n  review.\n- README \"Feedback closure\": state that worker output never creates findings.\n\n**Needs**:\n- Slice 1 — The fence is the validation contract\n\n**Acceptance Criteria**:\n- A backend whose worker returns continue three times with prose rationale and embedded finding tags, then complete, leaves zero findings on the stage and the stage completes.\n- Loading a run state file that contains a legacy worker-sourced finding succeeds and reports that finding as resolved.\n- The next repair prompt after a worker continue contains the worker's missing items under REQUIRED ACTION and contains no OPEN BLOCKING FINDINGS entry derived from worker prose.\n- The type checker rejects code that constructs a finding with the worker source.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "README.md",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "README.md",
+        "src/review.ts",
+        "src/runner.ts",
+        "src/store.ts",
+        "src/types.ts",
+        "tests/review.test.ts",
+        "tests/runner.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-3-validate-every-attempt-and-review-completion-claims",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-2-worker-verdicts-stop-minting-findings"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 3 — Validate every attempt and review completion claims\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- tests/**\n- docs/ARCHITECTURE.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- docs/ARCHITECTURE.md\n- src/review.ts\n- src/runner.ts\n- tests/runner.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- A backend whose worker returns continue with an empty missing-items list while validation passes and reviewers approve completes the stage without the worker ever returning complete.\n- A backend whose worker returns continue with two missing items triggers no reviewer call for that attempt and the following repair prompt lists both items.\n- A completion claim that omits a declared output produces a deterministic finding and a repair attempt rather than a failed stage.\n- Validation artifacts exist for every attempt directory, including attempts where the worker returned continue.\n- When a writer stage declares no validation commands the reviewer prompt says so explicitly and the run event log contains exactly one warning event for that stage.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/runner.ts, src/review.ts, tests/runner.test.ts, docs/ARCHITECTURE.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- tests/**\n- docs/ARCHITECTURE.md\n\nMove deterministic validation ahead of the status branch and define the\ncompletion claim.\n\n- Add `isCompletionClaim(review)` to `src/review.ts`: true for `complete`, and\n  for `continue` when `missingItems` is empty after trimming. `blocked` and\n  `needs_decision` are never claims.\n- In `runWriterStage`, after the direct-commit and path-contract checks, run\n  `validateStage` for every successful agent return before inspecting the\n  worker status. Branch order becomes: validation failed → deterministic\n  finding and repair, with the worker's `missingItems` appended to the fixed\n  repair direction when present; not a completion claim → worker direction\n  and repair, no reviewers; completion claim → output verification, then the\n  reviewer ensemble.\n- `verifyOutputs` runs only for completion claims, and a missing declared\n  output becomes a deterministic-validation finding routed into the repair\n  path instead of a thrown error that fails the stage.\n- Attempt records keep their current shapes and add\n  `asi.completionClaim: boolean`.\n- Reviewer prompt: replace \"No commands were configured.\" with a line that\n  names whether the stage declares commands, and the runner emits one\n  stage-level warning event when a writer stage declares none.\n- Architecture doc: the stage state machine text shows `implementing →\n  validating` as unconditional and `validating → reviewing` as requiring a\n  completion claim.\n\n**Needs**:\n- Slice 2 — Worker verdicts stop minting findings\n\n**Acceptance Criteria**:\n- A backend whose worker returns continue with an empty missing-items list while validation passes and reviewers approve completes the stage without the worker ever returning complete.\n- A backend whose worker returns continue with two missing items triggers no reviewer call for that attempt and the following repair prompt lists both items.\n- A completion claim that omits a declared output produces a deterministic finding and a repair attempt rather than a failed stage.\n- Validation artifacts exist for every attempt directory, including attempts where the worker returned continue.\n- When a writer stage declares no validation commands the reviewer prompt says so explicitly and the run event log contains exactly one warning event for that stage.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "docs/ARCHITECTURE.md",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "docs/ARCHITECTURE.md",
+        "src/review.ts",
+        "src/runner.ts",
+        "tests/runner.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-4-stuck-detection-and-the-worker-reflection-cap",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-3-validate-every-attempt-and-review-completion-claims"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 4 — Stuck detection and the worker reflection cap\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- tests/**\n- README.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- README.md\n- src/runner.ts\n- src/stagnation.ts\n- src/status.ts\n- src/types.ts\n- src/validation.ts\n- tests/runner.test.ts\n- tests/stagnation.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- Two consecutive worker attempts with the same diff hash, status and missing items produce a fingerprint match and the third prompt contains the nudge text exactly once.\n- A worker that returns continue with missing items four times in a row, with validation passing, is routed to reviewers on the fourth return and the run event log contains one reflection-cap event for that stage.\n- The status view for a running stage shows the reflection counter.\n- Existing stagnation tests remain green and new tests cover fingerprints that differ only in missing items or only in status.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/stagnation.ts, src/runner.ts, src/types.ts, src/validation.ts, src/status.ts, tests/stagnation.test.ts, tests/runner.test.ts, README.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- tests/**\n- README.md\n\nDetect a worker repeating itself and force verification.\n\n- Extend `stagnationFingerprint` to include the attempt's review status and the\n  sorted `missingItems`. This also sharpens `advanceRepairStrategy` for\n  reviewer-derived attempts; add a test showing two reviewer attempts that\n  differ only in status are no longer treated as stagnant.\n- Add `ContinuationPolicy.maxWorkerReflections` (default 3) with the default\n  applied in `normalizeManifest`.\n- In `runWriterStage`, track consecutive non-claim `continue` returns. When\n  `isStagnant` is true over the last two worker attempts, prepend a one-time\n  nudge to the next prompt modeled on the OpenHands action-error nudge: the\n  last two responses were identical and produced no diff; `continue` without\n  missing items is treated as a request for review; list concrete missing\n  items or return complete.\n- When the consecutive count reaches `maxWorkerReflections`, treat the next\n  return as a completion claim regardless of status: it still passes through\n  validation first, then reviewers. Emit `stage.worker.reflection_cap` once.\n- Status output: show \"worker reflections N/M\" for the running stage.\n\n**Needs**:\n- Slice 3 — Validate every attempt and review completion claims\n\n**Acceptance Criteria**:\n- Two consecutive worker attempts with the same diff hash, status and missing items produce a fingerprint match and the third prompt contains the nudge text exactly once.\n- A worker that returns continue with missing items four times in a row, with validation passing, is routed to reviewers on the fourth return and the run event log contains one reflection-cap event for that stage.\n- The status view for a running stage shows the reflection counter.\n- Existing stagnation tests remain green and new tests cover fingerprints that differ only in missing items or only in status.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "README.md",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "README.md",
+        "src/runner.ts",
+        "src/stagnation.ts",
+        "src/status.ts",
+        "src/types.ts",
+        "src/validation.ts",
+        "tests/runner.test.ts",
+        "tests/stagnation.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-5-fresh-closure-reviewers",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-4-stuck-detection-and-the-worker-reflection-cap"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 5 — Fresh closure reviewers\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- tests/**\n- README.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- README.md\n- src/dynamic-backend.ts\n- src/runner.ts\n- src/types.ts\n- tests/dynamic-backend.test.ts\n- tests/runner.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- With the default policy, two reviewers in the same attempt and the same reviewer across two attempts all carry distinct session scopes; with the policy off they carry none.\n- The dynamic backend test shows the session name includes the scope when present and is unchanged when absent.\n- Review-derived attempt records record whether reviewers were fresh.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/types.ts, src/dynamic-backend.ts, src/runner.ts, tests/dynamic-backend.test.ts, tests/runner.test.ts, README.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- tests/**\n- README.md\n\nMake `requireFreshClosureReviewer` mean something, or nothing reads it.\n\n- Add `AgentRequest.sessionScope?: string`. The dynamic backend appends it to\n  the session name, so distinct scopes never share a persisted transcript.\n- In `runReviewers`, the scope is the attempt number joined with the reviewer\n  index, because reviewers within one attempt already share a session name\n  today. When the policy is true (the default) every reviewer call carries the\n  scope; when false, the scope is omitted and the per-stage session is reused.\n- Record `asi.freshReviewers: boolean` on review-derived attempt records so\n  the audit can tell which closures were fresh.\n- README: document the setting's real behavior and its cost (no cached review\n  context across repairs).\n\n**Needs**:\n- Slice 4 — Stuck detection and the worker reflection cap\n\n**Acceptance Criteria**:\n- With the default policy, two reviewers in the same attempt and the same reviewer across two attempts all carry distinct session scopes; with the policy off they carry none.\n- The dynamic backend test shows the session name includes the scope when present and is unchanged when absent.\n- Review-derived attempt records record whether reviewers were fresh.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "README.md",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "README.md",
+        "src/dynamic-backend.ts",
+        "src/runner.ts",
+        "src/types.ts",
+        "tests/dynamic-backend.test.ts",
+        "tests/runner.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-6-wave-aware-compilation-behind-a-flag",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-5-fresh-closure-reviewers"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 6 — Wave-aware compilation behind a flag\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- bin/**\n- tests/**\n- README.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- README.md\n- bin/trip-compile.ts\n- src/compiler.ts\n- src/inspect.ts\n- src/runner.ts\n- src/types.ts\n- src/validation.ts\n- tests/compiler.test.ts\n- tests/fixtures/serial-golden.plan.md\n- tests/fixtures/serial-golden.trip.json\n- tests/validation.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- A plan whose slices use the bold parallel-safe label with the value yes is detected as declaring parallel safety.\n- With the waves option on, a plan with two independent parallel-safe slices followed by one slice that needs both compiles to two worktree writers, one checkpoint stage, and one same-checkout writer whose needs include the checkpoint stage; with the option off, the same plan compiles exactly as before this slice.\n- Every same-checkout writer in a mixed manifest carries at least one scheduling note explaining its serialization.\n- Manifest validation rejects a worktree stage whose base stage is not an earlier checkpoint stage, rejects two worktree writers in one wave with different bases, accepts a later-wave writer whose claims overlap an earlier wave's, and accepts the mixed fixture.\n- The serial golden fixture plan recompiles to the same stages, topology and settings as its committed manifest.\n- The checkpoint stage in the mixed fixture does not receive the final validation commands, while the integrate stage of an existing manifest without checkpoint stages still does.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/compiler.ts, src/types.ts, src/validation.ts, src/inspect.ts, src/runner.ts, bin/trip-compile.ts, tests/compiler.test.ts, tests/validation.test.ts, tests/fixtures/serial-golden.plan.md, tests/fixtures/serial-golden.trip.json, README.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- bin/**\n- tests/**\n- README.md\n\nDetect parallel safety as documented and compile dependency waves, without\nchanging what `--mode auto` emits until the runtime can execute waves.\n\n- Fix `parallelDeclared` to accept optional `**` on both sides of the label\n  and an optional colon, and add fixtures for the bold form.\n- Add a compile option `waves` (CLI `--waves`), default off. With it off,\n  every mode compiles exactly as today. With it on, the compiler assigns each\n  writer slice a wave index equal to its longest dependency path among writer\n  slices. A wave qualifies for fan-out when every slice in it declares\n  parallel safety, no two claims overlap, and no claim is a high-risk path.\n  A qualifying wave, including the last one, compiles to worktree writers plus\n  a stage `checkpoint-wave-N` of type `integration` with the new strategy\n  `worktree-wave-checkpoint`, whose `validationCommands` are the deduped union\n  of its writers' commands; other waves compile to same-checkout writers in\n  source order. The final `integrate` stage is unchanged and remains the only\n  branch-committing stage.\n- In waves mode, parallel blockers are evaluated per wave and the\n  \"declares dependencies\" blocker is dropped, because dependencies are edges\n  that place a slice in a later wave rather than reasons to serialize. The\n  sites that key the `parallel` flag, integration `needs` and the integration\n  `integrationStrategy` off a two-valued topology handle `mixed`. Any manifest\n  that contains a checkpoint stage has `selectedTopology: mixed`, even when\n  every writer sits in one qualifying wave, so the old fan-out label never\n  coexists with a checkpoint. Its final `integrate` stage uses\n  `same-checkout-finalize`, and the validator's expected-strategy check, which\n  targets the final non-checkpoint integration stage, accepts that pairing.\n- Add `TripStage.baseFrom?: string`, the id of the checkpoint stage whose\n  verified commit is the worktree base. Wave 1 worktree stages leave it unset.\n  A checkpoint stage carries `baseFrom` naming the previous wave's checkpoint\n  stage (unset for wave 1) and is subject to the same base rule, and its\n  `allowedPaths` are the union of its writers' allowed paths so the path\n  contract and resume scope checks cover the patches it applies.\n  Add `TripStage.schedulingNotes?: string[]` holding the per-slice reasons a\n  slice was serialized. `metadata.selectedTopology` and the validation result\n  topology gain the value `mixed`.\n- Relax manifest validation for mixed manifests, each rule behind the\n  presence of a checkpoint stage: mixed writer isolations allowed; more than\n  one integration stage allowed when all but the last use the checkpoint\n  strategy; strategy no longer inferred from writer isolations alone; writers\n  may follow a checkpoint stage; dependent worktree waves allowed when the\n  dependency is the checkpoint stage named by `baseFrom`; same-checkout writer\n  linear ordering enforced per wave; worktree claim overlap checked only among\n  writers that share the same `baseFrom`, since a later wave legitimately\n  touches files an earlier wave changed. Add: every `baseFrom` must name an\n  earlier checkpoint stage, and worktree writers in one wave must share the\n  same `baseFrom`.\n- `validateStage` skips `finalValidationCommands` only for stages whose\n  strategy is `worktree-wave-checkpoint`, so checkpoint stages run just their\n  own commands while every existing manifest's `integrate` stage keeps\n  receiving the final commands. This is the single runtime touch in this slice.\n- `describeManifest` prints, per stage, its isolation, wave, base and notes.\n- Commit a dedicated fixture plan with three slices and its manifest compiled\n  in serial mode. The test recompiles the fixture plan and compares only\n  `stages`, `metadata.selectedTopology` and `settings`, ignoring the\n  generated timestamp, source and policy hashes, contract hash and working\n  directory, which legitimately vary.\n\n**Needs**:\n- Slice 5 — Fresh closure reviewers\n\n**Acceptance Criteria**:\n- A plan whose slices use the bold parallel-safe label with the value yes is detected as declaring parallel safety.\n- With the waves option on, a plan with two independent parallel-safe slices followed by one slice that needs both compiles to two worktree writers, one checkpoint stage, and one same-checkout writer whose needs include the checkpoint stage; with the option off, the same plan compiles exactly as before this slice.\n- Every same-checkout writer in a mixed manifest carries at least one scheduling note explaining its serialization.\n- Manifest validation rejects a worktree stage whose base stage is not an earlier checkpoint stage, rejects two worktree writers in one wave with different bases, accepts a later-wave writer whose claims overlap an earlier wave's, and accepts the mixed fixture.\n- The serial golden fixture plan recompiles to the same stages, topology and settings as its committed manifest.\n- The checkpoint stage in the mixed fixture does not receive the final validation commands, while the integrate stage of an existing manifest without checkpoint stages still does.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "README.md",
+        "bin/**",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "README.md",
+        "bin/trip-compile.ts",
+        "src/compiler.ts",
+        "src/inspect.ts",
+        "src/runner.ts",
+        "src/types.ts",
+        "src/validation.ts",
+        "tests/compiler.test.ts",
+        "tests/fixtures/serial-golden.plan.md",
+        "tests/fixtures/serial-golden.trip.json",
+        "tests/validation.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-7-pool-scheduler-with-exclusive-stages",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-6-wave-aware-compilation-behind-a-flag"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 7 — Pool scheduler with exclusive stages\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- tests/**\n- docs/ARCHITECTURE.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- docs/ARCHITECTURE.md\n- src/runner.ts\n- src/types.ts\n- tests/runner.test.ts\n- tests/scheduler.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- With three ready worktree writers and a maximum concurrency of two, a backend that records overlapping calls observes at most two writers in flight, and the third starts as soon as the first finishes rather than after both.\n- A same-checkout stage that becomes ready while worktree writers are in flight starts only after they finish, and no worktree writer starts while it runs.\n- A pause raised by one in-flight writer leaves a sibling writer's attempt record persisted before the run pauses, and a superseded lease observed by one writer ends the loop without persisting the sibling's later writes.\n- A new test with two stages that need each other reports a deadlock only after the running stages have finished, and existing scheduler tests for skipped dependencies and lease reclaim remain green.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/runner.ts, src/types.ts, tests/scheduler.test.ts, tests/runner.test.ts, docs/ARCHITECTURE.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- tests/**\n- docs/ARCHITECTURE.md\n\nReplace one-stage-per-iteration and chunked batches with a bounded pool.\n\n- Add a small pool in `src/runner.ts` in the shape of wireit's worker pool: a\n  count of available slots and a queue of waiters, sized by `maxParallel`.\n- `executeLoop` dispatches while slots remain and a schedulable stage exists,\n  then awaits the first completion and re-evaluates readiness. Readiness stays\n  as today (all needs completed); schedulability adds the exclusivity rule: a\n  stage whose isolation is same-checkout, or whose type is integration, may\n  start only when nothing is in flight, and while it runs nothing else starts.\n- Skipped-dependency marking and deadlock detection run only when the\n  in-flight count is zero, so a transiently empty ready set while stages run\n  is never mistaken for a deadlock.\n- A `PauseRun` or `AbortRun` from any in-flight stage stops further dispatch,\n  waits for the other in-flight stages to reach their durable boundary, then\n  propagates as today. A `LeaseSuperseded` or lease generation mismatch stops\n  dispatch and returns the durable state immediately without persisting\n  sibling results, because another worker owns the run.\n- Run state writes from concurrent stages are already serialized by the state\n  lock; add a test that two concurrent writers both persist their attempt\n  records.\n- Architecture doc: describe the pool, the exclusivity rule and the\n  in-flight guard on deadlock detection.\n\n**Needs**:\n- Slice 6 — Wave-aware compilation behind a flag\n\n**Acceptance Criteria**:\n- With three ready worktree writers and a maximum concurrency of two, a backend that records overlapping calls observes at most two writers in flight, and the third starts as soon as the first finishes rather than after both.\n- A same-checkout stage that becomes ready while worktree writers are in flight starts only after they finish, and no worktree writer starts while it runs.\n- A pause raised by one in-flight writer leaves a sibling writer's attempt record persisted before the run pauses, and a superseded lease observed by one writer ends the loop without persisting the sibling's later writes.\n- A new test with two stages that need each other reports a deadlock only after the running stages have finished, and existing scheduler tests for skipped dependencies and lease reclaim remain green.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "docs/ARCHITECTURE.md",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "docs/ARCHITECTURE.md",
+        "src/runner.ts",
+        "src/types.ts",
+        "tests/runner.test.ts",
+        "tests/scheduler.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-8-multi-wave-execution-in-the-runtime",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-7-pool-scheduler-with-exclusive-stages"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 8 — Multi-wave execution in the runtime\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- tests/**\n- docs/ARCHITECTURE.md\n- docs/IMPLEMENTATION-STATUS.md\n- README.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- README.md\n- docs/ARCHITECTURE.md\n- docs/IMPLEMENTATION-STATUS.md\n- src/compiler.ts\n- src/git.ts\n- src/reaper.ts\n- src/runner.ts\n- src/types.ts\n- tests/compiler.test.ts\n- tests/git.test.ts\n- tests/liveness.test.ts\n- tests/runner.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- A two-wave manifest runs the second wave's worktree writers from the first wave's checkpoint commit, the checkpoint stage leaves the branch head unchanged, and the final commit contains changes from all writers.\n- A second-wave fan-in whose run-owned patch hash differs from the first checkpoint's recorded hash pauses with the workspace-drift kind and applies no patches, and a checkpoint whose validation command fails pauses with the checkpoint-blocked kind without writing a checkpoint ref and with the wave's patches reverted from the tree.\n- A run paused with the checkpoint-blocked kind resumes, re-applies the wave's patches exactly once, and completes when validation passes; a resume after a completed checkpoint in a mixed manifest does not report workspace drift.\n- No integration agent request is made for a checkpoint stage; the backend sees only writer, reviewer and final-integration roles.\n- Manifests compiled before this slice, with no checkpoint stages, run unchanged and the existing worktree fan-in test stays green; in a wave-aware manifest the final integrate stage applies zero worktree patches.\n- Compiling this plan in auto mode now yields the wave-aware result, and the serial golden fixture still matches in serial mode.\n- The status document no longer lists multiple parallel implementation epochs as deferred and the README no longer states the one-wave limitation.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/runner.ts, src/git.ts, src/compiler.ts, src/types.ts, src/reaper.ts, tests/runner.test.ts, tests/git.test.ts, tests/compiler.test.ts, tests/liveness.test.ts, docs/ARCHITECTURE.md, docs/IMPLEMENTATION-STATUS.md, README.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- tests/**\n- docs/ARCHITECTURE.md\n- docs/IMPLEMENTATION-STATUS.md\n- README.md\n\nExecute checkpoint waves and make wave-aware compilation the default.\n\n- `writerLocation` resolves a worktree stage's base: the `verifiedCommit` of\n  the checkpoint stage named by `baseFrom`, else the run base revision. The\n  worktree is created from that base, and the immutable-base assertion at the\n  start of `runWriterStage` compares against it rather than the run base.\n- `persistWriterBoundary` passes the same resolved base to\n  `createCheckpointCommit`, so wave-N worktree checkpoints are computed\n  against their real base instead of failing silently inside the existing\n  try/catch.\n- A `worktree-wave-checkpoint` stage is deterministic: `runIntegrationStage`\n  branches on the strategy before any agent call, and no integration agent\n  runs for it. It applies the verified patches of exactly the writers whose\n  `baseFrom` matches its own base (unset for wave 1), runs its own validation\n  commands, captures the cumulative run-owned patch and records\n  `cumulativePatchPath` and `cumulativePatchSha256` on its stage state, then\n  calls `createCheckpointCommit` with that patch. The checkpoint commit's\n  parent is the run base revision, which is the main checkout's HEAD and what\n  the helper's base check requires; only its base trailer carries the resolved\n  wave base. The stage stores the hash in `verifiedCommit` and appends a\n  `wave.checkpointed` event. It does not call the branch-commit path, does not\n  set `resultCommit`, and does not write the integration journal.\n- Checkpoint validation failure first reverse-applies the writer patches the\n  checkpoint stage applied through a new `reverseApplyPatch` helper in\n  `src/git.ts` with its own test, restoring the run-owned paths to the previous\n  checkpoint's tree (or to the run base for wave 1), then pauses the run with a\n  new pause kind `checkpoint_blocked` whose reason names the failing command.\n  No checkpoint ref is written, and the reaper's stop list includes the new\n  kind. On resume the stage re-applies its wave's patches once and proceeds, so\n  the wave-1 clean-checkout assertion and the later-wave drift check both hold\n  on re-entry.\n- Resume reconciliation, which today compares the working tree only against\n  the latest completed same-checkout writer's cumulative patch hash, takes the\n  latest completed stage among same-checkout writers and checkpoint stages, so\n  a resume after a checkpoint in a mixed manifest does not report drift against\n  a stale writer hash.\n- Clean-checkout handling: the wave-1 checkpoint keeps today's clean-checkout\n  assertion. Because checkpoint commits use a temporary index and leave the\n  working tree carrying the wave's changes uncommitted, every later checkpoint\n  stage and the final `integrate` stage in a manifest that contains checkpoint\n  stages replace the clean-checkout assertion with a drift check: the SHA-256\n  of the current run-owned patch must equal the previous checkpoint stage's\n  recorded cumulative patch hash, following the existing reconciliation\n  pattern. A mismatch pauses with `workspace_drift` and applies no patches.\n- In a wave-aware manifest every qualifying wave, including the last, has a\n  checkpoint stage, so the final `integrate` stage applies no worktree patches\n  itself; it keeps today's behavior for branch commit, result commit and\n  journal. Manifests without checkpoint stages run exactly as before.\n- The compiler's `--mode auto` becomes wave-aware by default; `--waves` stays\n  as an explicit override and `--mode serial` is unchanged.\n- Docs: architecture describes waves; the status document removes the deferred\n  item for multiple parallel implementation epochs; the README limitation that\n  only one same-base parallel writer wave is supported is deleted.\n\n**Needs**:\n- Slice 7 — Pool scheduler with exclusive stages\n\n**Acceptance Criteria**:\n- A two-wave manifest runs the second wave's worktree writers from the first wave's checkpoint commit, the checkpoint stage leaves the branch head unchanged, and the final commit contains changes from all writers.\n- A second-wave fan-in whose run-owned patch hash differs from the first checkpoint's recorded hash pauses with the workspace-drift kind and applies no patches, and a checkpoint whose validation command fails pauses with the checkpoint-blocked kind without writing a checkpoint ref and with the wave's patches reverted from the tree.\n- A run paused with the checkpoint-blocked kind resumes, re-applies the wave's patches exactly once, and completes when validation passes; a resume after a completed checkpoint in a mixed manifest does not report workspace drift.\n- No integration agent request is made for a checkpoint stage; the backend sees only writer, reviewer and final-integration roles.\n- Manifests compiled before this slice, with no checkpoint stages, run unchanged and the existing worktree fan-in test stays green; in a wave-aware manifest the final integrate stage applies zero worktree patches.\n- Compiling this plan in auto mode now yields the wave-aware result, and the serial golden fixture still matches in serial mode.\n- The status document no longer lists multiple parallel implementation epochs as deferred and the README no longer states the one-wave limitation.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/IMPLEMENTATION-STATUS.md",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/IMPLEMENTATION-STATUS.md",
+        "src/compiler.ts",
+        "src/git.ts",
+        "src/reaper.ts",
+        "src/runner.ts",
+        "src/types.ts",
+        "tests/compiler.test.ts",
+        "tests/git.test.ts",
+        "tests/liveness.test.ts",
+        "tests/runner.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-9-activity-clock-and-bounded-reclaim",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-8-multi-wave-execution-in-the-runtime"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan docs/plans/review-fixes.plan.md.\n\nSLICE\nSlice 9 — Activity clock and bounded reclaim\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n- tests/**\n- README.md\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- README.md\n- src/reaper.ts\n- src/runner.ts\n- src/status.ts\n- src/store.ts\n- src/types.ts\n- src/validation.ts\n- tests/liveness.test.ts\n- tests/scheduler.test.ts\n- tests/status.test.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- Streaming activity from a mocked backend updates the persisted last-activity timestamp while the heartbeat timestamp advances independently.\n- A stage whose stale lease is reclaimed four times pauses the run with the new pause kind and a reason naming the stage and count, the reaper returns without resuming again, and three operator resumes of a paused run do not change the counter.\n- The status view distinguishes a live-and-active run from a live-but-idle run.\n- Existing liveness tests for warnings, heartbeat shutdown and reaper recovery remain green.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: src/types.ts, src/store.ts, src/runner.ts, src/reaper.ts, src/status.ts, src/validation.ts, tests/liveness.test.ts, tests/scheduler.test.ts, tests/status.test.ts, README.md\n\n**Parallel-safe**: no\n\n**Allowed paths**:\n- src/**\n- tests/**\n- README.md\n\nGive the lease a second clock and stop infinite reclaim loops.\n\n- Add `RunLease.lastActivityAt?: string`. The activity callbacks in `runAgent`\n  and validation command execution update it in memory; `heartbeatRunLease`\n  gains a parameter to persist it, and `writeRunState` carries it alongside\n  `heartbeatAt`.\n- Add `StageRunState.reclaims` (initialized to zero in `newStageState`,\n  undefined read as zero for old state files) and\n  `ContinuationPolicy.maxLeaseReclaims` (default 3, applied in\n  `normalizeManifest`). `reconcileInterruptedStages` increments the counter\n  only when the claim's previous status was running, which is the stale-lease\n  reclaim case; operator resumes of paused or failed runs do not count.\n- When the counter exceeds the maximum, the run pauses with a new pause kind\n  `reclaim_exhausted` and a reason naming the stage and count. The reaper's\n  stop list includes the new kind so it does not resume again.\n- Status output: the lease line shows heartbeat age and activity age\n  separately, and a running stage with a fresh heartbeat but stale activity is\n  labeled \"alive, idle\".\n- README activity-warnings section: describe the two clocks and the reclaim\n  bound.\n\n**Needs**:\n- Slice 8 — Multi-wave execution in the runtime\n\n**Acceptance Criteria**:\n- Streaming activity from a mocked backend updates the persisted last-activity timestamp while the heartbeat timestamp advances independently.\n- A stage whose stale lease is reclaimed four times pauses the run with the new pause kind and a reason naming the stage and count, the reaper returns without resuming again, and three operator resumes of a paused run do not change the counter.\n- The status view distinguishes a live-and-active run from a live-but-idle run.\n- Existing liveness tests for warnings, heartbeat shutdown and reaper recovery remain green.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "README.md",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [
+        "README.md",
+        "src/reaper.ts",
+        "src/runner.ts",
+        "src/status.ts",
+        "src/store.ts",
+        "src/types.ts",
+        "src/validation.ts",
+        "tests/liveness.test.ts",
+        "tests/scheduler.test.ts",
+        "tests/status.test.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "integrate",
+      "type": "integration",
+      "needs": [
+        "implement-slice-9-activity-clock-and-bounded-reclaim"
+      ],
+      "isolation": "same-checkout",
+      "integrationStrategy": "same-checkout-finalize",
+      "prompt": "Integrate and finalize the approved implementation from docs/plans/review-fixes.plan.md. Do not introduce new scope. Resolve only in-contract integration issues, run the final quality gates, and leave commit creation to the Prompt-chain hybrid runtime.",
+      "allowedPaths": [
+        "README.md",
+        "bin/**",
+        "docs/ARCHITECTURE.md",
+        "docs/IMPLEMENTATION-STATUS.md",
+        "package-lock.json",
+        "package.json",
+        "skills/**",
+        "src/**",
+        "tests/**"
+      ],
+      "claimedPaths": [],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true,
+      "parallel": false
+    }
+  ]
+}
