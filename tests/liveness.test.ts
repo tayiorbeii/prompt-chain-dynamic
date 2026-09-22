@@ -3,12 +3,87 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { git } from "../src/git.ts";
-import { waitForHeartbeatStop } from "../src/liveness.ts";
+import { git, runCommand } from "../src/git.ts";
+import { monitorActivity, waitForHeartbeatStop } from "../src/liveness.ts";
 import { RunReaper } from "../src/reaper.ts";
 import { runManifestFile } from "../src/runner.ts";
 import { claimRunLease, loadRunState, runRoot, writeRunState } from "../src/store.ts";
 import type { AgentBackend, AgentRequest, AgentResult, TripManifest } from "../src/types.ts";
+
+test("activity resets warnings; silence warns periodically without ending the operation", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const warnings: Array<{ elapsedMs: number; idleMs: number }> = [];
+  const monitor = monitorActivity(100, (warning) => { warnings.push(warning); });
+  t.after(() => monitor.stop());
+  async function advance(ms: number) {
+    now += ms;
+    t.mock.timers.tick(ms);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  for (let i = 0; i < 5; i++) {
+    await advance(90);
+    monitor.activity();
+  }
+  assert.equal(warnings.length, 0, "activity outlives the original wall-clock limit");
+  await advance(100);
+  assert.deepEqual(warnings, [{ elapsedMs: 550, idleMs: 100 }]);
+  await advance(100);
+  assert.deepEqual(warnings[1], { elapsedMs: 650, idleMs: 200 });
+  monitor.activity();
+  await advance(90);
+  assert.equal(warnings.length, 2);
+  now += 10;
+  t.mock.timers.tick(10);
+  monitor.activity();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(warnings.length, 2, "activity also suppresses a queued, not-yet-delivered warning");
+  monitor.stop();
+  monitor.activity();
+  await advance(1_000);
+  assert.equal(warnings.length, 2, "no warning or rearming after stop");
+});
+
+test("warning observer failure or a pending observer cannot terminate work or pile up callbacks", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  let calls = 0;
+  const monitor = monitorActivity(100, () => {
+    calls++;
+    if (calls === 1) throw new Error("observer failed");
+    return new Promise<void>(() => {});
+  });
+  t.after(() => monitor.stop());
+  for (let i = 0; i < 4; i++) {
+    now += 100;
+    t.mock.timers.tick(100);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(calls, 2);
+});
+
+test("zero disables warnings while waiting for completion", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const monitor = monitorActivity(0, () => assert.fail("warnings are disabled"));
+  monitor.activity();
+  t.mock.timers.tick(1_000_000);
+  monitor.stop();
+});
+
+test("waiting retains the process even with warnings disabled and no other active handles", async () => {
+  for (const interval of [0, 60_000]) {
+    const script = `
+      import { monitorActivity } from ${JSON.stringify(new URL("../src/liveness.ts", import.meta.url).href)};
+      const monitor = monitorActivity(${interval}, () => {});
+      setTimeout(() => { monitor.stop(); console.log("settled"); }, 20).unref();
+    `;
+    const result = await runCommand(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script], { cwd: process.cwd() });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout.trim(), "settled", `warning interval ${interval} must retain the waiting process`);
+  }
+});
 
 function success(text: string): AgentResult {
   return { success: true, text, durationMs: 1 };
@@ -43,6 +118,79 @@ class ReadonlyBackend implements AgentBackend {
     return success("Research complete.");
   }
 }
+
+test("a silent backend warns and returns its real result without a replacement", async () => {
+  const repository = await createRepository();
+  const manifest = readonlyManifest(repository);
+  manifest.settings!.sessionTimeoutMs = 20;
+  const manifestPath = path.join(repository, "warning.trip.json");
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  let calls = 0;
+  let warnings = 0;
+  const state = await runManifestFile({
+    manifestPath,
+    externalReaper: false,
+    backend: {
+      async run(request) {
+        calls++;
+        assert.equal(request.timeoutMs, 0, "the backend must not inherit a hard deadline");
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return success("Research complete.");
+      },
+    },
+    onEvent(event) {
+      if (event.type === "agent.call.idle") {
+        warnings++;
+        assert.match(event.message, /continuing to wait/i);
+      }
+    },
+  });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(calls, 1);
+  assert.ok(warnings > 0);
+  const events = await readFile(path.join(runRoot(repository, state.id), "events.jsonl"), "utf8");
+  assert.match(events, /agent\.call\.idle/);
+  assert.doesNotMatch(events, /agent\.call\.failed/);
+});
+
+test("an active backend can exceed its interval and warning observers cannot fail it", async () => {
+  const repository = await createRepository();
+  const manifest = readonlyManifest(repository);
+  manifest.settings!.continuationPolicy!.agentCallTimeoutMs = 20;
+  const manifestPath = path.join(repository, "active.trip.json");
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  let calls = 0;
+  let ticks = 0;
+  let warnings = 0;
+  const state = await runManifestFile({
+    manifestPath, externalReaper: false,
+    backend: {
+      async run(request) {
+        calls++;
+        assert.equal(request.timeoutMs, 0);
+        assert.ok(request.onActivity);
+        for (let i = 0; i < 10; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          request.onActivity();
+          ticks++;
+        }
+        // A subsequent silent spell and broken warning sink still aren't failures.
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return success("Research complete.");
+      },
+    },
+    onEvent(event) {
+      if (event.type === "agent.call.idle") {
+        warnings++;
+        throw new Error("notification sink failed");
+      }
+    },
+  });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(calls, 1);
+  assert.equal(ticks, 10);
+  assert.ok(warnings > 0);
+});
 
 test("heartbeat shutdown is bounded when a renewal never settles", async () => {
   const never = new Promise<void>(() => {});
@@ -168,12 +316,17 @@ test("best-effort exhaustion retains the final cumulative candidate patch", asyn
   assert.match(await readFile(path.join(runRoot(repository, state.id), "events.jsonl"), "utf8"), /stage\.cumulative_attempt\.retained/);
 });
 
-class HangingDecisionBackend implements AgentBackend {
+class DelayedDecisionBackend implements AgentBackend {
   reviewCalls = 0;
+  decisionCalls = 0;
 
   async run(request: AgentRequest): Promise<AgentResult> {
     await mkdir(request.cwd, { recursive: true });
-    if (request.role === "decision") return await new Promise<AgentResult>(() => {});
+    if (request.role === "decision") {
+      this.decisionCalls++;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return success("<decision><status>decided</status><choice>safe</choice><rationale>Examined the options.</rationale><implementationDirection>Use the safe option.</implementationDirection></decision>");
+    }
     if (request.role === "implementation" || request.role === "repair" || request.role === "integration") {
       await mkdir(path.join(request.cwd, "src"), { recursive: true });
       await writeFile(path.join(request.cwd, "src", "choice.ts"), "export const choice = 'safe';\n");
@@ -308,11 +461,11 @@ test("automatic follow-up remediation builds on the current worktree before reco
   assert.match(await readFile(path.join(runRoot(repository, state.id), "events.jsonl"), "utf8"), /stage\.follow_up\.automatic_started/);
 });
 
-test("a hanging decision call times out, uses best judgement, and does not pause the chain", async () => {
+test("a silent decision warns and completes without fallback or replacement", async () => {
   const repository = await createRepository();
   const manifest: TripManifest = {
     schemaVersion: 1,
-    name: "Decision timeout",
+    name: "Decision inactivity warning",
     workingDirectory: repository,
     settings: {
       autoCommit: false,
@@ -344,8 +497,17 @@ test("a hanging decision call times out, uses best judgement, and does not pause
   const manifestPath = path.join(os.tmpdir(), `decision-timeout-${Date.now()}.json`);
   await writeFile(manifestPath, JSON.stringify(manifest));
 
-  const state = await runManifestFile({ manifestPath, backend: new HangingDecisionBackend(), externalReaper: false });
+  const backend = new DelayedDecisionBackend();
+  let warnings = 0;
+  const state = await runManifestFile({
+    manifestPath, backend, externalReaper: false,
+    onEvent(event) {
+      if (event.type === "agent.call.idle" && event.message.includes("decision agent")) warnings++;
+    },
+  });
   assert.equal(state.status, "completed", state.pauseReason);
-  assert.ok(state.decisions.some((decision) => decision.source === "auto" && decision.status === "decided"));
-  assert.ok(state.findings.some((finding) => finding.summary === "Autonomous fallback decision was used" && finding.disposition === "follow-up-created"));
+  assert.equal(backend.decisionCalls, 1);
+  assert.ok(warnings > 0);
+  assert.ok(state.decisions.some((decision) => decision.actor === "agent" && decision.status === "decided"));
+  assert.ok(!state.findings.some((finding) => finding.summary === "Autonomous fallback decision was used"));
 });

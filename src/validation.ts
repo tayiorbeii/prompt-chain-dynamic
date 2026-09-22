@@ -20,6 +20,7 @@ const DEFAULT_SETTINGS: Required<Pick<TripSettings,
   maxParallel: 4,
   failFast: false,
   autoCommit: true,
+  // Legacy field names retained for compiled manifests; these only trigger idle warnings.
   sessionTimeoutMs: 30 * 60_000,
   commandTimeoutMs: 15 * 60_000,
 };

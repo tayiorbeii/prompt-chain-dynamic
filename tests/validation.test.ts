@@ -48,6 +48,23 @@ test("accepts a one-wave worktree fanout and literal Next.js route", () => {
   assert.equal(result.normalized?.stages[1]?.claimedPaths?.[0], "app/api/items/[id]/route.ts");
 });
 
+test("retains legacy warning intervals, including explicit zero, in normalized manifests", () => {
+  const defaults = validateManifest(baseManifest()).normalized!.settings!;
+  assert.equal(defaults.sessionTimeoutMs, 30 * 60_000);
+  assert.equal(defaults.commandTimeoutMs, 15 * 60_000);
+  const manifest = baseManifest();
+  manifest.settings = {
+    sessionTimeoutMs: 0, commandTimeoutMs: 123,
+    continuationPolicy: { agentCallTimeoutMs: 456, decisionTimeoutMs: 789 },
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.valid, true);
+  assert.equal(result.normalized?.settings?.sessionTimeoutMs, 0);
+  assert.equal(result.normalized?.settings?.commandTimeoutMs, 123);
+  assert.equal(result.normalized?.settings?.continuationPolicy?.agentCallTimeoutMs, 456);
+  assert.equal(result.normalized?.settings?.continuationPolicy?.decisionTimeoutMs, 789);
+});
+
 test("rejects overlapping worktree claims", () => {
   const manifest = baseManifest();
   manifest.stages[2] = { ...manifest.stages[2]!, allowedPaths: ["app/api/items/[id]/route.ts"], claimedPaths: ["app/api/items/[id]/route.ts"] };

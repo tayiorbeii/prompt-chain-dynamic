@@ -1,3 +1,56 @@
+export interface ActivityWarning {
+  elapsedMs: number;
+  idleMs: number;
+}
+
+/** Observe silence without rejecting, cancelling, or replacing the operation. */
+export function monitorActivity(
+  warningAfterMs: number,
+  onWarning: (warning: ActivityWarning) => void | Promise<void>,
+): { activity: () => void; stop: () => void } {
+  const startedAt = performance.now();
+  let lastActivityAt = startedAt;
+  let stopped = false;
+  let notifying = false;
+  let timer: NodeJS.Timeout | undefined;
+  const warningsEnabled = Number.isFinite(warningAfterMs) && warningAfterMs > 0;
+
+  function arm(delayMs = warningsEnabled ? warningAfterMs : 2 ** 31 - 1): void {
+    if (stopped) return;
+    // Keep waiting operations alive even with warnings disabled and no other handles.
+    timer = setTimeout(() => {
+      if (!warningsEnabled) { arm(); return; }
+      const remaining = warningAfterMs - (performance.now() - lastActivityAt);
+      if (remaining > 0) { arm(remaining); return; }
+      arm();
+      if (notifying) return;
+      notifying = true;
+      void Promise.resolve().then(() => {
+        const now = performance.now();
+        if (!stopped && now - lastActivityAt >= warningAfterMs) {
+          return onWarning({ elapsedMs: now - startedAt, idleMs: now - lastActivityAt });
+        }
+      }).catch(() => {
+        // Warning delivery is advisory, never an operation failure.
+      }).finally(() => { notifying = false; });
+    }, Math.min(Math.ceil(delayMs), 2 ** 31 - 1));
+  }
+
+  arm();
+  return {
+    activity() {
+      if (stopped) return;
+      lastActivityAt = performance.now();
+      if (timer) clearTimeout(timer);
+      arm();
+    },
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    },
+  };
+}
+
 export class OperationTimeoutError extends Error {
   readonly timeoutMs: number;
 

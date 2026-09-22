@@ -87,8 +87,9 @@ export class DynamicWorkflowBackend implements AgentBackend {
         sessionName: `prompt-chain:${request.runId} ${request.stageId}:${request.role}`,
         tier: this.#options.roleTiers?.[request.role] ?? defaultTier(request.role),
         model: this.#options.roleModels?.[request.role],
-        timeoutMs: request.timeoutMs,
         toolNames: request.tools,
+        onHistory: () => request.onActivity?.(),
+        onUsageProgress: () => request.onActivity?.(),
         onUsage: (usage: AgentUsage) => this.#options.onUsage?.(request, usage),
       };
       const text = request.role === "decision"

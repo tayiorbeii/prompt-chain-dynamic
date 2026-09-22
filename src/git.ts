@@ -3,6 +3,7 @@ import { lstat, readFile, readlink } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { ValidationResult } from "./types.ts";
+import { monitorActivity, type ActivityWarning } from "./liveness.ts";
 
 export interface CommandResult {
   exitCode: number;
@@ -15,7 +16,7 @@ export interface CommandResult {
 export async function runCommand(
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string } ,
+  options: { cwd: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string; onActivity?: () => void },
 ): Promise<CommandResult> {
   const started = Date.now();
   const timeoutMs = options.timeoutMs ?? 0;
@@ -31,8 +32,8 @@ export async function runCommand(
     let timer: NodeJS.Timeout | undefined;
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; options.onActivity?.(); });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; options.onActivity?.(); });
     child.on("error", reject);
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
@@ -187,13 +188,21 @@ export async function applyPatch(cwd: string, patch: Buffer): Promise<void> {
 export async function runValidationCommands(
   cwd: string,
   commands: string[],
-  timeoutMs: number,
+  warningAfterMs: number,
+  onWarning: (command: string, warning: ActivityWarning) => void | Promise<void> = (command, warning) => {
+    console.warn(`Validation ${command}: no output for ${Math.round(warning.idleMs)}ms; continuing to wait.`);
+  },
 ): Promise<ValidationResult[]> {
   const results: ValidationResult[] = [];
   for (const command of commands) {
-    const result = await runCommand("/bin/sh", ["-lc", command], { cwd, timeoutMs });
-    results.push({ command, ...result });
-    if (result.exitCode !== 0) break;
+    const monitor = monitorActivity(warningAfterMs, (warning) => onWarning(command, warning));
+    try {
+      const result = await runCommand("/bin/sh", ["-lc", command], { cwd, onActivity: monitor.activity });
+      results.push({ command, ...result });
+      if (result.exitCode !== 0) break;
+    } finally {
+      monitor.stop();
+    }
   }
   return results;
 }

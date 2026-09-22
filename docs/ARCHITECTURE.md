@@ -23,7 +23,7 @@ A DAG models macro dependencies. Repair and decision behavior is not represented
 
 ### pi-dynamic-workflows
 
-`DynamicWorkflowBackend` calls `WorkflowAgent` with a role-specific TypeBox schema, model tier, tools, working directory, timeout, and persisted session name. It supplies reasoning execution, not authorization.
+`DynamicWorkflowBackend` calls `WorkflowAgent` with a role-specific TypeBox schema, model tier, tools, working directory, and persisted session name. It supplies reasoning execution, not authorization. Supported history and streaming-usage callbacks report activity to the runtime; final usage reporting is preserved. No wall-clock deadline is passed to the backend. The runtime awaits the original agent or validation result, emitting advisory inactivity warnings (live and durable) without cancellation, failure classification, or replacement. Legacy timeout settings now select warning intervals, and activity resets the warning timer. Lease/control-plane bounds are independent and unchanged.
 
 ### Git transaction layer
 

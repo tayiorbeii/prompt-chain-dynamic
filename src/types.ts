@@ -65,9 +65,9 @@ export interface ContinuationPolicy {
   autoResumeTurnLimit?: number;
   consecutiveFailureOverride?: number;
   leaseTimeoutMs?: number;
-  /** Hard wall-clock timeout for each backend agent call. Defaults to sessionTimeoutMs. */
+  /** Inactivity warning interval for backend calls; never cancels. Defaults to sessionTimeoutMs. */
   agentCallTimeoutMs?: number;
-  /** Hard wall-clock timeout for autonomous decision calls. */
+  /** Inactivity warning interval for decision calls; never cancels or selects a fallback. */
   decisionTimeoutMs?: number;
   /** Maximum time shutdown waits for an in-flight lease renewal. */
   heartbeatStopTimeoutMs?: number;
@@ -155,7 +155,9 @@ export interface TripSettings {
   reviewPolicy?: ReviewPolicy;
   defaultValidationCommands?: string[];
   finalValidationCommands?: string[];
+  /** Legacy name: agent inactivity warning interval (default 30 minutes); 0 disables warnings. */
   sessionTimeoutMs?: number;
+  /** Legacy name: validation inactivity warning interval (default 15 minutes); 0 disables warnings. */
   commandTimeoutMs?: number;
   modelRouting?: {
     mainModel?: string;
@@ -285,7 +287,10 @@ export interface AgentRequest {
   cwd: string;
   prompt: string;
   tools: string[];
+  /** Runtime passes 0: no backend wall-clock deadline. */
   timeoutMs: number;
+  /** Report observed agent/tool activity, not an unconditional heartbeat. */
+  onActivity?: () => void;
   artifactDirectory: string;
 }
 

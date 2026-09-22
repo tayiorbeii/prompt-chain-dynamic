@@ -35,7 +35,7 @@ import { buildDecisionPrompt, decisionRequestFromReview, parseDecision } from ".
 import { hashContract } from "./contract.ts";
 import { isStagnant } from "./stagnation.ts";
 import { spawnResearchHook } from "./research-hook.ts";
-import { waitForHeartbeatStop, withTimeout } from "./liveness.ts";
+import { monitorActivity, waitForHeartbeatStop, withTimeout, type ActivityWarning } from "./liveness.ts";
 import { spawnRunReapers } from "./reaper-launcher.ts";
 import {
   appendRunEvent,
@@ -1043,7 +1043,10 @@ async function validateStage(
     ...(stage.validationCommands?.length ? stage.validationCommands : context.manifest.settings?.defaultValidationCommands ?? []),
     ...(integration ? context.manifest.settings?.finalValidationCommands ?? [] : []),
   ]);
-  const results = await runValidationCommands(cwd, commands, context.manifest.settings?.commandTimeoutMs ?? 15 * 60_000);
+  const results = await runValidationCommands(
+    cwd, commands, context.manifest.settings?.commandTimeoutMs ?? 15 * 60_000,
+    (command, warning) => reportIdleWarning(context, stage.id, "validation.command.idle", `Validation ${command}`, warning, { command }),
+  );
   stageState.validationResults = results;
   await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/validation.json`, `${JSON.stringify(results, null, 2)}\n`);
   return results;
@@ -1398,7 +1401,7 @@ function agentRequest(
     cwd,
     prompt,
     tools,
-    timeoutMs: context.manifest.settings?.sessionTimeoutMs ?? 30 * 60_000,
+    timeoutMs: 0,
     artifactDirectory,
   };
 }
@@ -1768,24 +1771,37 @@ function escapeXml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+async function reportIdleWarning(
+  context: RunnerContext,
+  stageId: string,
+  type: "agent.call.idle" | "validation.command.idle",
+  label: string,
+  warning: ActivityWarning,
+  details: Record<string, unknown>,
+): Promise<void> {
+  const message = `${label}: no observed activity for ${Math.round(warning.idleMs)}ms (${Math.round(warning.elapsedMs)}ms elapsed); continuing to wait. Silence does not prove a hang.`;
+  // Do not mutate run state or treat the lease heartbeat as operation activity.
+  await withTimeout(Promise.allSettled([
+    appendRunEvent(context.repositoryRoot, context.state.id, { type, stageId, message, ...warning, ...details }),
+    Promise.resolve().then(() => context.onEvent?.({ type, stageId, message })),
+  ]), 1_000, "idle warning delivery");
+}
+
 async function runAgent(
   context: RunnerContext,
   request: AgentRequest,
   label: string,
-  timeoutOverrideMs?: number,
+  warningOverrideMs?: number,
 ): Promise<AgentResult> {
-  const timeoutMs = timeoutOverrideMs
+  const warningAfterMs = warningOverrideMs
     ?? context.manifest.settings?.continuationPolicy?.agentCallTimeoutMs
-    ?? request.timeoutMs
     ?? context.manifest.settings?.sessionTimeoutMs
     ?? 30 * 60_000;
   const startedAt = Date.now();
+  const monitor = monitorActivity(warningAfterMs, (warning) =>
+    reportIdleWarning(context, request.stageId, "agent.call.idle", label, warning, { role: request.role }));
   try {
-    return await withTimeout(
-      Promise.resolve().then(async () => await context.backend.run(request)),
-      timeoutMs,
-      label,
-    );
+    return await context.backend.run({ ...request, timeoutMs: 0, onActivity: monitor.activity });
   } catch (error) {
     const message = errorMessage(error);
     try {
@@ -1795,7 +1811,7 @@ async function runAgent(
           stageId: request.stageId,
           role: request.role,
           error: message,
-          timeoutMs,
+          warningAfterMs,
         }),
         1_000,
         "agent failure event write",
@@ -1804,6 +1820,8 @@ async function runAgent(
       // The durable lease/reaper is the fallback when the event filesystem is unavailable.
     }
     return { success: false, text: "", error: message, durationMs: Date.now() - startedAt };
+  } finally {
+    monitor.stop();
   }
 }
 
