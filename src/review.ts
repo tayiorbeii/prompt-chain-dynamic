@@ -102,6 +102,17 @@ export function findingsFromReview(
 }
 
 /**
+ * A completion claim is what routes a worker return to output verification and
+ * the reviewer ensemble: an explicit `complete`, or a `continue` that lists
+ * nothing as missing. `blocked` and `needs_decision` are never claims.
+ */
+export function isCompletionClaim(review: NormalizedReview): boolean {
+  if (review.status === "complete") return true;
+  if (review.status !== "continue") return false;
+  return review.missingItems.every((item) => !item.trim());
+}
+
+/**
  * A worker's own verdict is direction for its next attempt, never evidence.
  * It cannot open a Finding; only reviewers and deterministic validation can.
  */

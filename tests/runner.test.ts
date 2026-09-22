@@ -751,3 +751,146 @@ test("legacy worker-sourced findings load as resolved", async () => {
   assert.equal(migrated?.resolutionEvidence?.rationale, "legacy worker self-report; not evidence");
   assert.equal(state.findings.find((finding) => finding.id === "finding-review")?.disposition, "open");
 });
+
+// --- Slice 3: validate every attempt; review completion claims ---
+
+function slice3Manifest(repository: string, stage: Partial<TripManifest["stages"][number]>): TripManifest {
+  return {
+    schemaVersion: 1,
+    name: "Completion claims",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      reviewPolicy: { required: true, reviewerCount: 1, maxRepairRounds: 4, malformedVerdict: "continue", requireFreshClosureReviewer: true },
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      { id: "impl", type: "implementation", needs: ["research"], isolation: "same-checkout", prompt: "Implement x.", allowedPaths: ["src/**"], claimedPaths: ["src/x.ts"], ...stage },
+      { id: "integrate", type: "integration", needs: ["impl"], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate.", allowedPaths: ["src/**"] },
+    ],
+  };
+}
+
+async function writeManifest(name: string, manifest: TripManifest): Promise<string> {
+  const manifestPath = path.join(os.tmpdir(), `${name}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  return manifestPath;
+}
+
+test("a worker continue with no missing items is a completion claim that reviewers can close", async () => {
+  const repository = await createRepository();
+  let reviewCalls = 0;
+  let workerStatuses: string[] = [];
+  class ContinueButDoneBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context.");
+      if (request.stageId === "impl" && request.role === "implementation") {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "x.ts"), "export const x = 1;\n");
+        workerStatuses.push("continue");
+        return result("<status>continue</status><risk>low</risk><rationale>Implemented; someone should verify.</rationale><missingItems></missingItems>");
+      }
+      if (request.stageId === "impl" && request.role === "review") { reviewCalls += 1; return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>"); }
+      if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      if (request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Fine.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const manifestPath = await writeManifest("continue-claim", slice3Manifest(repository, { validationCommands: ["true"] }));
+  const state = await runManifestFile({ manifestPath, backend: new ContinueButDoneBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.deepEqual(workerStatuses, ["continue"], "the worker never returned complete");
+  assert.equal(reviewCalls, 1);
+  assert.equal(state.stageStates.impl?.attempts.at(-1)?.status, "keep");
+  assert.equal(state.stageStates.impl?.attempts.at(-1)?.asi.completionClaim, true);
+});
+
+test("validation runs on every attempt and a continue with missing items skips reviewers", async () => {
+  const repository = await createRepository();
+  let reviewCalls = 0;
+  let workerCalls = 0;
+  class MissingItemsBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context.");
+      if (request.stageId === "impl" && (request.role === "implementation" || request.role === "repair")) {
+        workerCalls += 1;
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "x.ts"), `export const x = ${workerCalls};\n`);
+        if (workerCalls < 3) return result("<status>continue</status><risk>low</risk><rationale>Partial.</rationale><missingItems>Add docs\nAdd a test</missingItems>");
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.stageId === "impl" && request.role === "review") { reviewCalls += 1; return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>"); }
+      if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      if (request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Fine.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const manifestPath = await writeManifest("missing-items", slice3Manifest(repository, { validationCommands: ["true"] }));
+  const state = await runManifestFile({ manifestPath, backend: new MissingItemsBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(workerCalls, 3);
+  assert.equal(reviewCalls, 1, "reviewers run only for the completion claim");
+  for (const attempt of [1, 2, 3]) {
+    const artifact = path.join(repository, ".pi", "prompt-chain-hybrid", "runs", state.id, "stages", "impl", `attempt-${attempt}`, "validation.json");
+    const results = JSON.parse(await readFile(artifact, "utf8")) as Array<{ command: string; exitCode: number }>;
+    assert.deepEqual(results.map((entry) => [entry.command, entry.exitCode]), [["true", 0]], `attempt ${attempt} must carry validation evidence`);
+  }
+  assert.equal(state.stageStates.impl?.attempts[0]?.asi.completionClaim, false);
+});
+
+test("a completion claim missing a declared output becomes a finding and a repair, not a failed stage", async () => {
+  const repository = await createRepository();
+  let workerCalls = 0;
+  class ForgetfulBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context.");
+      if (request.stageId === "impl" && (request.role === "implementation" || request.role === "repair")) {
+        workerCalls += 1;
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "x.ts"), "export const x = 1;\n");
+        if (workerCalls === 2) await writeFile(path.join(request.cwd, "src", "out.ts"), "export const out = 1;\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+      if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const manifestPath = await writeManifest("missing-output", slice3Manifest(repository, { outputs: ["src/out.ts"], claimedPaths: ["src/x.ts", "src/out.ts"] }));
+  const state = await runManifestFile({ manifestPath, backend: new ForgetfulBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(workerCalls, 2);
+  const outputFinding = state.findings.find((finding) => /Declared outputs are missing: src\/out\.ts/.test(finding.summary));
+  assert.equal(outputFinding?.source, "deterministic-validation");
+  assert.equal(outputFinding?.disposition, "resolved");
+  assert.equal(state.stageStates.impl?.attempts[0]?.status, "checks_failed");
+});
+
+test("a writer stage without validation commands warns exactly once and tells reviewers it is a plan defect", async () => {
+  const repository = await createRepository();
+  let reviewPrompt = "";
+  class NoCommandsBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context.");
+      if (request.stageId === "impl" && request.role === "implementation") {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        await writeFile(path.join(request.cwd, "src", "x.ts"), "export const x = 1;\n");
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.stageId === "impl" && request.role === "review") { reviewPrompt = request.prompt; return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>"); }
+      if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      if (request.role === "review") return result("<status>complete</status><risk>low</risk><rationale>Fine.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const manifestPath = await writeManifest("no-commands", slice3Manifest(repository, {}));
+  const state = await runManifestFile({ manifestPath, backend: new NoCommandsBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.match(reviewPrompt, /This stage declares no validation commands\. That is a plan defect/);
+  const events = (await readFile(path.join(repository, ".pi", "prompt-chain-hybrid", "runs", state.id, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; stageId?: string });
+  assert.equal(events.filter((event) => event.type === "stage.validation.none" && event.stageId === "impl").length, 1);
+});

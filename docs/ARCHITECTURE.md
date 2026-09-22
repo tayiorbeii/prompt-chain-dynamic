@@ -11,13 +11,16 @@ The JSON manifest is the canonical program and authorization contract. It owns s
 The scheduler finds dependency-ready stages. Each stage is a state machine:
 
 ```text
-pending → preparing → implementing → validating → reviewing
-                                      ↑              │
-                                      └── repairing ← continue
+pending → preparing → implementing → validating ──(completion claim)──→ reviewing
+                                      ↑    │                              │
+                                      │    └─(not a claim: worker direction)   │
+                                      └── repairing ←─────────────────────────┘ continue
                                                      needs_decision → deciding
                                                      blocked → paused
                                                      complete → capturing → checkpointed
 ```
+
+`implementing → validating` is unconditional: deterministic validation runs on every worker return, whatever status the worker reported. `validating → reviewing` requires a *completion claim*, which is an explicit `complete` or a `continue` that lists nothing as missing. A `continue` with missing items goes straight back to repairing with those items as direction, without reviewers. A completion claim that lacks a declared output produces a deterministic finding and repairs, rather than failing the stage. Worker output never creates findings; only validation and reviewers do.
 
 A DAG models macro dependencies. Repair and decision behavior is not represented as additional DAG nodes.
 

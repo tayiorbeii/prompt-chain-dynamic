@@ -29,6 +29,7 @@ import {
   normalizeReview,
   openBlockingFindings,
   reconcileOpenFindings,
+  isCompletionClaim,
   synthesizeReviews,
   workerDirection,
 } from "./review.ts";
@@ -672,7 +673,11 @@ async function runWriterStage(
     const candidatePatchPaths = patchPathsForStage(context, stage, cumulativeAttemptDelta.changedDuring);
 
     const workerReview = normalizeReview(result.text);
-    if (workerReview.status !== "complete") {
+    const completionClaim = isCompletionClaim(workerReview);
+    // Deterministic validation runs on every attempt regardless of the worker's
+    // status, so repair prompts and reviewers always see real evidence.
+    const validation = await validateStage(context, stage, stageState, agentCwd, integration, attemptNum);
+    if (!completionClaim && validationPassed(validation)) {
       // The worker's self-report never enters the finding pipeline: a
       // `continue` becomes direction for the next attempt, and `blocked` or
       // `needs_decision` escalate without minting findings from worker prose.
@@ -685,14 +690,14 @@ async function runWriterStage(
       const discardRecord: AttemptRecord = {
         attempt: attemptNum,
         role,
-        validationResults: stageState.validationResults,
+        validationResults: validation,
         // Findings a worker embeds in its own verdict are not evidence; drop them
         // so they never echo back into later prompts as attempt evidence.
         reviewVerdict: { ...workerReview, findings: [] },
         diffHash,
         patchPath,
         patchSha256: diffHash,
-        asi: { source: "worker" },
+        asi: { source: "worker", completionClaim: false },
         status: "discard",
         startedAt: attemptStartedAt,
         completedAt: new Date().toISOString(),
@@ -714,9 +719,12 @@ async function runWriterStage(
       continue;
     }
 
-    await verifyOutputs(agentCwd, stage.outputs ?? []);
-    const validation = await validateStage(context, stage, stageState, agentCwd, integration, attemptNum);
     if (!validationPassed(validation)) {
+      // Validation failure outranks the worker's own status, but its reported
+      // missing items still travel with the deterministic direction.
+      const validationDirection = workerReview.missingItems.some((item) => item.trim())
+        ? `Fix the deterministic validation failures exactly; do not expand scope.\n\nAlso complete the items you reported as missing:\n${workerReview.missingItems.filter((item) => item.trim()).map((item) => `- ${item.trim()}`).join("\n")}`
+        : "Fix the deterministic validation failures exactly; do not expand scope.";
       const finding = validationFinding(context, stage, stageState, validation);
       await addFinding(context, finding);
       const candidatePatch = await captureBinaryPatch(gitRoot, candidatePatchPaths);
@@ -746,7 +754,7 @@ async function runWriterStage(
           stageState,
           agentCwd,
           attemptHistory,
-          "Fix the deterministic validation failures exactly; do not expand scope.",
+          validationDirection,
           researchEscalations,
         );
         researchEscalations = next.researchEscalations;
@@ -755,7 +763,38 @@ async function runWriterStage(
         await writeRunState(context.repositoryRoot, context.state);
         continue;
       }
-      nextPrompt = repairPrompt(stage, context.state, "Fix the deterministic validation failures exactly; do not expand scope.");
+      nextPrompt = repairPrompt(stage, context.state, validationDirection);
+      continue;
+    }
+
+    // A completion claim must also have produced every declared output. A miss
+    // is deterministic evidence routed into the repair loop, not a thrown error
+    // that would fail the stage.
+    const missingOutput = await missingOutputs(agentCwd, stage.outputs ?? []);
+    if (missingOutput.length) {
+      const finding = outputFinding(context, stage, stageState, missingOutput);
+      await addFinding(context, finding);
+      const candidatePatch = await captureBinaryPatch(gitRoot, candidatePatchPaths);
+      const diffHash = sha256(candidatePatch);
+      const patchPath = await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/candidate.patch.diff`, candidatePatch);
+      attemptHistory.push({
+        attempt: attemptNum,
+        role,
+        validationResults: validation,
+        reviewVerdict: emptyReview(),
+        diffHash,
+        patchPath,
+        patchSha256: diffHash,
+        asi: { source: "deterministic-validation", completionClaim: true, missingOutputs: missingOutput },
+        status: "checks_failed",
+        startedAt: attemptStartedAt,
+        completedAt: new Date().toISOString(),
+        contractHash: stageState.contractHash,
+      });
+      consecutiveNonProgress++;
+      stageState.reviewRounds += 1;
+      nextPrompt = repairPrompt(stage, context.state, `Create the declared outputs that are still missing, inside your allowed paths: ${missingOutput.join(", ")}`);
+      await writeRunState(context.repositoryRoot, context.state);
       continue;
     }
 
@@ -783,7 +822,7 @@ async function runWriterStage(
         diffHash,
         patchPath,
         patchSha256: diffHash,
-        asi: { source: "ensemble-review" },
+        asi: { source: "ensemble-review", completionClaim: true },
         status: "keep",
         startedAt: attemptStartedAt,
         completedAt: new Date().toISOString(),
@@ -823,7 +862,7 @@ async function runWriterStage(
       diffHash,
       patchPath,
       patchSha256: diffHash,
-      asi: { source: integration ? "integration-review" : "independent-review" },
+      asi: { source: integration ? "integration-review" : "independent-review", completionClaim: true },
       status: "discard",
       startedAt: attemptStartedAt,
       completedAt: new Date().toISOString(),
@@ -1067,6 +1106,9 @@ async function validateStage(
     ...(stage.validationCommands?.length ? stage.validationCommands : context.manifest.settings?.defaultValidationCommands ?? []),
     ...(integration ? context.manifest.settings?.finalValidationCommands ?? [] : []),
   ]);
+  if (!commands.length && !integration && attemptNum === 1) {
+    await emit(context, "stage.validation.none", `Stage ${stage.id} declares no validation commands; reviewers will see no deterministic evidence`, stage.id);
+  }
   const results = await runValidationCommands(
     cwd, commands, context.manifest.settings?.commandTimeoutMs ?? 15 * 60_000,
     (command, warning) => reportIdleWarning(context, stage.id, "validation.command.idle", `Validation ${command}`, warning, { command }),
@@ -1219,14 +1261,16 @@ function isStrayIgnorablePath(context: RunnerContext, stage: TripStage, value: s
   return !allowed.some((pattern) => assertPathCovered(value, [pattern]));
 }
 
-async function verifyOutputs(cwd: string, outputs: string[]): Promise<void> {
+async function missingOutputs(cwd: string, outputs: string[]): Promise<string[]> {
+  const missing: string[] = [];
   for (const output of outputs) {
     try {
       await access(path.join(cwd, normalizeRepoPath(output)));
     } catch {
-      throw new Error(`declared output does not exist: ${output}`);
+      missing.push(output);
     }
   }
+  return missing;
 }
 
 async function addFinding(context: RunnerContext, finding: Finding): Promise<void> {
@@ -1264,6 +1308,31 @@ function validationFinding(
     evidence: failed ? `${failed.stdout}\n${failed.stderr}`.trim() : JSON.stringify(results),
     suggestedRemediation: "Fix the validation failure without expanding the approved scope, then rerun the exact command.",
     affectedPaths: stageState.changedPaths,
+    disposition: "open",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function outputFinding(
+  context: RunnerContext,
+  stage: TripStage,
+  stageState: StageRunState,
+  missing: string[],
+): Finding {
+  const now = new Date().toISOString();
+  return {
+    id: `finding-${randomUUID()}`,
+    runId: context.state.id,
+    stageId: stage.id,
+    attempt: stageState.attempts.length,
+    source: "deterministic-validation",
+    severity: "major",
+    blocking: true,
+    summary: `Declared outputs are missing: ${missing.join(", ")}`,
+    evidence: missing.map((output) => `${output}: not found in the stage checkout after a completion claim`).join("\n"),
+    suggestedRemediation: "Create every declared output inside the allowed paths, then return complete.",
+    affectedPaths: missing,
     disposition: "open",
     createdAt: now,
     updatedAt: now,
@@ -1365,7 +1434,11 @@ OPEN FINDINGS THAT MUST BE EXPLICITLY CLOSED OR RETAINED
 ${formatOpenFindings(open)}
 
 DETERMINISTIC VALIDATION
-${validation.length ? validation.map((result) => `${result.exitCode === 0 ? "PASS" : "FAIL"}: ${result.command}`).join("\n") : "No commands were configured."}
+${validation.length
+    ? validation.map((result) => `${result.exitCode === 0 ? "PASS" : "FAIL"}: ${result.command}`).join("\n")
+    : stage.validationCommands?.length
+      ? "Declared validation commands produced no results."
+      : "This stage declares no validation commands. That is a plan defect (missing Targeted Validation fence), not evidence against the implementation; review the diff on its merits and note the gap as non-blocking."}
 
 Rules:
 - A successful process exit is not proof of correctness.

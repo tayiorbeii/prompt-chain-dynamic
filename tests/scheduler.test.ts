@@ -252,8 +252,9 @@ test("consecutive non-progress records follow-up after its automatic remediation
       if (request.role === "research") return result("Research complete.");
       if (request.stageId === "impl") {
         implementationAttempts++;
-        // Never complete — always return continue
-        return result("<status>continue</status><risk>low</risk><rationale>Still working.</rationale>");
+        // Never complete — always return continue with a concrete missing item, so
+        // it is non-progress rather than a completion claim that would route to review.
+        return result("<status>continue</status><risk>low</risk><rationale>Still working.</rationale><missingItems>Finish the implementation</missingItems>");
       }
       return result("<status>complete</status><risk>low</risk><rationale>OK.</rationale>");
     }
