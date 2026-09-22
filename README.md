@@ -186,6 +186,12 @@ npm run typecheck
 ```
 ```
 
+The Targeted Validation fence is the validation contract: every non-blank,
+non-comment line in it becomes a stage command verbatim, with no allowlist, and
+nothing outside the fence contributes. A declared label whose fence yields no
+command fails compilation. Slices without a fence fall back to an allowlisted
+scan of command-like lines and compile with an author warning.
+
 Compilation freezes:
 
 - Source-plan hash.

@@ -293,3 +293,99 @@ Edit the root server entrypoint.
   assert.ok(!writer?.allowedPaths?.includes("**"));
   assert.ok(!writer?.allowedPaths?.includes("./**"));
 });
+
+// --- Slice 1: the Targeted Validation fence is the validation contract ---
+
+async function fencePlanRepo(plan: string): Promise<{ root: string; plan: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trip-fence-"));
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ scripts: { test: "echo test" } }));
+  const planPath = path.join(root, "plan.md");
+  await writeFile(planPath, plan, "utf8");
+  return { root, plan: planPath };
+}
+
+test("fence commands are taken verbatim and prose never adds commands once a fence exists", async () => {
+  const { root, plan } = await fencePlanRepo(`# Fence contract
+
+### Slice 1 — Types
+
+**Files**: \`src/a.ts\`
+
+**Parallel-safe**: no
+
+Do the work.
+
+**Acceptance Criteria**:
+- \`npm test\` passes with both tests green.
+
+**Targeted Validation**:
+\`\`\`sh
+# type check first
+npx tsc --noEmit
+$ node --experimental-strip-types scripts/check.ts
+\`\`\`
+`);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "serial" });
+  const writer = result.manifest.stages.find((stage) => stage.type === "implementation");
+  assert.deepEqual(writer?.validationCommands, ["npx tsc --noEmit", "node --experimental-strip-types scripts/check.ts"]);
+  assert.deepEqual(result.manifest.settings?.finalValidationCommands, ["npx tsc --noEmit", "node --experimental-strip-types scripts/check.ts"]);
+  assert.equal(result.warnings.some((warning) => /no Targeted Validation fence/.test(warning)), false);
+});
+
+test("a declared Targeted Validation label with an empty fence fails compilation unless unresolved slices are allowed", async () => {
+  const { root, plan } = await fencePlanRepo(`# Empty fence
+
+### Slice 1 — Types
+
+**Files**: \`src/a.ts\`
+
+**Targeted Validation**:
+\`\`\`sh
+\`\`\`
+`);
+  await assert.rejects(
+    compilePlanFile(plan, { workingDirectory: root, mode: "serial" }),
+    /Targeted Validation is declared but no command was extracted:\n- Slice 1 — Types/,
+  );
+  const lenient = await compilePlanFile(plan, { workingDirectory: root, mode: "serial", allowUnresolved: true });
+  const writer = lenient.manifest.stages.find((stage) => stage.type === "implementation");
+  assert.deepEqual(writer?.validationCommands, []);
+  assert.ok(lenient.warnings.some((warning) => /Slice 1 — Types: Targeted Validation fence yielded no commands/.test(warning)));
+});
+
+test("a slice without a Targeted Validation label keeps the loose-scan fallback and warns", async () => {
+  const { root, plan } = await fencePlanRepo(`# Loose
+
+### Slice 1 — Types
+
+**Files**: \`src/a.ts\`
+
+- \`npm test\`
+`);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "serial" });
+  const writer = result.manifest.stages.find((stage) => stage.type === "implementation");
+  assert.deepEqual(writer?.validationCommands, ["npm test"]);
+  assert.ok(result.warnings.some((warning) => /Slice 1 — Types: no Targeted Validation fence; validation commands came from the loose line scan/.test(warning)));
+});
+
+test("backticked Files entries produce bare claims that directory-glob allowed paths cover", async () => {
+  const { root, plan } = await fencePlanRepo(`# Backticks
+
+### Slice 1 — Types
+
+**Files**: \`src/a.ts\`, \`tests/a.test.ts\`
+
+**Allowed paths**:
+- src/**
+- tests/**
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+`);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "serial" });
+  const writer = result.manifest.stages.find((stage) => stage.type === "implementation");
+  assert.deepEqual(writer?.claimedPaths, ["src/a.ts", "tests/a.test.ts"]);
+  assert.deepEqual(writer?.allowedPaths, ["src/**", "tests/**"]);
+});

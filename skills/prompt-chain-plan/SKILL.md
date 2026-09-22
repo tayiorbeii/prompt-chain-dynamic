@@ -70,24 +70,38 @@ A slice's `**File**:` / `**Files**:` list is its concrete **claim** — the file
 - **Serial stages inherit the tree.** In a same-checkout serial chain, each stage runs on top of the previous stage's *uncommitted* changes. That is by design: later stages build on earlier schema/helper/fixture edits, and the writer prompt tells them so. Do not re-list a prior stage's files in a later slice to "re-authorize" them — they are already in-contract.
 - **`--path-policy strict`** pins allowed paths to exactly the claimed files. Use it only when you deliberately want hard per-file isolation, and expect more pauses.
 
-### Avoid compiler command-extraction traps
+### The Targeted Validation fence is the contract
 
-The compiler scans every line of a slice's body — not only its `Targeted Validation` fence — for text that looks like a runnable command (`npm test`, `pnpm lint`, `cargo test`, etc.), including bullets under **Acceptance Criteria**. A line such as:
+When a slice has a `**Targeted Validation**:` label followed by a `sh`/`bash`
+fence, every non-blank, non-comment line in that fence becomes a stage
+validation command, verbatim and in order. There is no allowlist: a TypeScript
+compiler invocation, a Node script, or a project-specific check all survive
+exactly as written. Nothing outside the fence contributes to that slice's
+commands, so command-like prose in **Acceptance Criteria** is harmless once a
+fence exists.
 
-```markdown
-- `npm test` passes with both tests green.
-```
+Two rules follow:
 
-can be mis-captured as a second, malformed validation command (the trailing backtick is not stripped mid-sentence), which then fails deterministically no matter how correct the implementation is, and burns all repair rounds before pausing as `review_blocked`.
+- A slice that declares the label but whose fence yields no command **fails
+  compilation** naming the slice. Under `--allow-unresolved` it compiles with an
+  author warning and no stage commands. Either way the gap is visible, never
+  silent.
+- A slice with **no** Targeted Validation label falls back to the loose scan:
+  allowlisted command-like lines (`npm test`, `pnpm lint`, `cargo test`, …)
+  anywhere in the body, including bullets. That scan can mis-capture prose such
+  as `` `npm test` passes with both tests green. `` as a malformed command, so
+  for fence-less slices describe outcomes in prose without backticked commands,
+  or better, add the fence.
 
-To avoid this:
+The document-level final validation commands are the deduped union of every
+Targeted Validation fence in the plan; only a plan with no fence at all falls
+back to the loose scan and then to package scripts.
 
-- State the exact runnable command **only** inside the `**Targeted Validation**:` fenced block.
-- In **Acceptance Criteria** prose, describe the *outcome* instead of repeating the command in backticks — e.g. "the test suite passes with both tests green" rather than `` `npm test` passes with both tests green ``.
-- If a command-like phrase must appear in prose for clarity, rewrite it without backticks or without a trailing period directly after the closing backtick, since either form can still match the extractor.
-- After compiling, always inspect the emitted manifest's `validationCommands` per stage (or run `/prompt-chain-inspect`) and confirm each command is real, complete, and singular before approving the plan or starting a run.
-
-If a compiled manifest is found to contain a corrupted or duplicated validation command, treat it as a plan/compiler defect: fix the plan wording (or, if necessary, hand-edit the JSON) and recompile — never approve a manifest with a validation command that cannot possibly pass.
+After compiling, inspect the emitted manifest's `validationCommands` per stage
+(or run `/prompt-chain-inspect`) and confirm each command is real, complete, and
+singular before approving the plan. A corrupted or duplicated command is a plan
+or compiler defect: fix the wording and recompile; never approve a manifest with
+a command that cannot possibly pass.
 
 ## Independent plan review
 

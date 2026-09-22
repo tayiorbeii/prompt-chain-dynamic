@@ -50,6 +50,10 @@ interface PlanSlice {
   claimedPaths: string[];
   allowedPaths: string[];
   validationCommands: string[];
+  /** Where the slice's validation commands came from. "fence" is authoritative. */
+  validationSource: "fence" | "loose" | "none";
+  /** A Targeted Validation label was present but its fence yielded no command. */
+  emptyValidationLabel: boolean;
   needs: string[];
   acceptanceCriteria: string[];
   parallelDeclared: boolean;
@@ -77,6 +81,13 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
   }
   const runnableSlices = slices.filter((slice) => slice.claimedPaths.length);
   if (!runnableSlices.length) throw new Error("no implementation slices with concrete repository paths were found");
+  // The Targeted Validation fence is the author's explicit contract. A label
+  // whose fence yields nothing would compile to a stage reviewers can never
+  // see evidence for, so it fails loudly instead of silently.
+  const emptyValidation = runnableSlices.filter((slice) => slice.emptyValidationLabel);
+  if (emptyValidation.length && !options.allowUnresolved) {
+    throw new Error(`cannot compile plan: Targeted Validation is declared but no command was extracted:\n${emptyValidation.map((slice) => `- ${slice.title}`).join("\n")}`);
+  }
 
   const requestedMode = options.mode ?? "auto";
   const blockers = parallelBlockers(runnableSlices);
@@ -94,6 +105,10 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
   const stages = buildStages(runnableSlices, selectedTopology, finalValidationCommands, path.relative(workingDirectory, planPath));
   const warnings = [
     ...unresolved.map((slice) => `${slice.title}: ${slice.unresolvedReasons.join("; ")}`),
+    ...emptyValidation.map((slice) => `${slice.title}: Targeted Validation fence yielded no commands; the stage has no validation commands`),
+    ...runnableSlices
+      .filter((slice) => !slice.emptyValidationLabel && slice.validationSource !== "fence")
+      .map((slice) => `${slice.title}: no Targeted Validation fence; ${slice.validationSource === "loose" ? "validation commands came from the loose line scan" : "the stage has no validation commands"}`),
     ...(selectedTopology === "same-checkout-serial" && blockers.length
       ? blockers.map((value) => `serialized: ${value}`)
       : []),
@@ -185,7 +200,7 @@ function parseSlices(markdown: string, pathPolicy: PathPolicy = "permissive"): P
       : pathPolicy === "permissive"
         ? permissiveAllowedPaths(claimedPaths)
         : claimedPaths;
-    const validationCommands = extractCommands(section.body);
+    const validation = sliceValidationCommands(section.body);
     const needs = extractListUnderLabel(section.body, ["Needs", "Dependencies"]).map(slug);
     const acceptanceCriteria = extractListUnderLabel(section.body, ["Acceptance criteria", "Acceptance Criteria", "Test Impact"]);
     const parallelDeclared = /(?:parallel[- ]safe|parallel safety)\s*(?::|\*\*)?\s*(?:yes|true|independent)/i.test(section.body)
@@ -199,7 +214,9 @@ function parseSlices(markdown: string, pathPolicy: PathPolicy = "permissive"): P
       sourceIndex: section.index,
       claimedPaths,
       allowedPaths,
-      validationCommands,
+      validationCommands: validation.commands,
+      validationSource: validation.source,
+      emptyValidationLabel: validation.emptyLabel,
       needs,
       acceptanceCriteria,
       parallelDeclared,
@@ -356,8 +373,12 @@ async function inferWorkingDirectory(planPath: string): Promise<string> {
 }
 
 async function discoverFinalValidationCommands(cwd: string, markdown: string): Promise<string[]> {
-  const explicit = extractCommands(markdown);
-  if (explicit.length) return explicit;
+  // Union of every Targeted Validation fence in the document; only a document
+  // with no fence at all falls back to the loose scan, then to package scripts.
+  const fenced = extractFenceCommands(markdown);
+  if (fenced.length) return fenced;
+  const loose = extractLooseCommands(markdown);
+  if (loose.length) return loose;
   const packagePath = path.join(cwd, "package.json");
   if (await exists(packagePath)) {
     const packageJson = JSON.parse(await readFile(packagePath, "utf8")) as { scripts?: Record<string, string> };
@@ -414,7 +435,10 @@ function extractRepoPaths(text: string): string[] {
 }
 
 function cleanCandidate(input: string): string | undefined {
-  const value = input.trim().replace(/^['"(]+|['"),.;:]+$/g, "").replaceAll("\\", "/").replace(/^\.\//, "");
+  // Files-label entries are commonly written as `path` in the plan template;
+  // strip the backticks so the claim is the bare path the allowed-path check
+  // can cover, not a second backticked duplicate.
+  const value = input.trim().replace(/^[`'"(]+|[`'"),.;:]+$/g, "").replaceAll("\\", "/").replace(/^\.\//, "");
   if (!value || value.startsWith("http") || value.startsWith("/") || value.includes(" ")) return undefined;
   if (/^(npm|pnpm|yarn|bun|git|node|python|cargo|go)\b/.test(value)) return undefined;
   if (!value.includes("/") && !/\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|mdx|css|scss|py|go|rs|java|kt|swift|yml|yaml|toml|sql|sh|lock)$/.test(value)) return undefined;
@@ -426,7 +450,36 @@ function cleanCandidate(input: string): string | undefined {
   }
 }
 
-function extractCommands(text: string): string[] {
+const TARGETED_VALIDATION_LABEL = /\*{0,2}Targeted Validation\*{0,2}\s*:?/gi;
+
+function hasTargetedValidationLabel(text: string): boolean {
+  return /Targeted Validation/i.test(text);
+}
+
+/**
+ * The fence that follows a Targeted Validation label is the author's contract:
+ * every non-blank, non-comment line is a command, verbatim, in order. No
+ * allowlist applies, so `npx tsc --noEmit` or a Node script survive intact.
+ */
+function extractFenceCommands(text: string): string[] {
+  const output = new Set<string>();
+  for (const label of text.matchAll(TARGETED_VALIDATION_LABEL)) {
+    const rest = text.slice((label.index ?? 0) + label[0].length);
+    const fence = rest.match(/^\s*```(?:sh|bash|shell|zsh)?[^\n]*\n([\s\S]*?)```/);
+    if (!fence) continue;
+    for (const line of (fence[1] ?? "").split(/\r?\n/)) {
+      const command = line.trim().replace(/^[$>]\s*/, "");
+      if (command && !command.startsWith("#")) output.add(command);
+    }
+  }
+  return [...output].slice(0, 20);
+}
+
+/**
+ * Fallback for slices without a Targeted Validation fence: allowlisted
+ * command-like lines anywhere in the body, including unlabeled fences.
+ */
+function extractLooseCommands(text: string): string[] {
   const output = new Set<string>();
   for (const fence of text.matchAll(/```(?:sh|bash|shell|zsh)?\s*\n([\s\S]*?)```/gi)) {
     for (const line of (fence[1] ?? "").split(/\r?\n/)) {
@@ -439,6 +492,18 @@ function extractCommands(text: string): string[] {
     if (isValidationCommand(command)) output.add(command);
   }
   return [...output].slice(0, 20);
+}
+
+function sliceValidationCommands(body: string): { commands: string[]; source: "fence" | "loose" | "none"; emptyLabel: boolean } {
+  const labeled = hasTargetedValidationLabel(body);
+  if (labeled) {
+    const fenced = extractFenceCommands(body);
+    // A labeled fence, even an empty one, silences the loose scan: the author
+    // declared the contract, so prose must not add commands behind their back.
+    return { commands: fenced, source: fenced.length ? "fence" : "none", emptyLabel: fenced.length === 0 };
+  }
+  const loose = extractLooseCommands(body);
+  return { commands: loose, source: loose.length ? "loose" : "none", emptyLabel: false };
 }
 
 function isValidationCommand(value: string): boolean {
