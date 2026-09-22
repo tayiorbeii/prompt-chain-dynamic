@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "name": "Serial golden",
+  "workingDirectory": ".",
+  "metadata": {
+    "generator": {
+      "name": "prompt-chain-plan-compiler",
+      "version": "0.1.0"
+    },
+    "sourceGuide": "serial-golden.plan.md",
+    "generatedAt": "2026-09-22T23:39:26.059Z",
+    "requestedMode": "serial",
+    "selectedTopology": "same-checkout-serial",
+    "topologyReasons": [
+      "Slice 1 — Types does not explicitly declare parallel safety",
+      "Slice 1 — Types: high-risk shared path: src/types.ts",
+      "Slice 2 — Runtime declares dependencies: slice-1-types",
+      "Slice 3 — Docs declares dependencies: slice-2-runtime"
+    ],
+    "authorWarnings": [
+      "serialized: Slice 1 — Types does not explicitly declare parallel safety",
+      "serialized: Slice 1 — Types: high-risk shared path: src/types.ts",
+      "serialized: Slice 2 — Runtime declares dependencies: slice-1-types",
+      "serialized: Slice 3 — Docs declares dependencies: slice-2-runtime"
+    ],
+    "unresolvedSections": [],
+    "sourcePlanHash": "sha256:9913af7084aff9eb9dd40e016e581bc15918f440baa54a0b5df3d88b1026dd76",
+    "policyHashes": {},
+    "pathPolicy": "permissive",
+    "runtime": {
+      "engine": "pi-dynamic-workflows",
+      "version": "3.0.0"
+    },
+    "contractHash": "sha256:fdbcc0cb39ef0ee6e50331dcc1c52151097f6fe6cdace597020e7ed04d85302c"
+  },
+  "settings": {
+    "maxParallel": 3,
+    "failFast": false,
+    "autoCommit": true,
+    "sessionTimeoutMs": 1800000,
+    "commandTimeoutMs": 900000,
+    "decisionPolicy": {
+      "mode": "agent",
+      "maxDecisionRounds": 2,
+      "requireBestEffortDecision": true,
+      "prepareHumanRecommendation": true
+    },
+    "reviewPolicy": {
+      "required": true,
+      "reviewerCount": 2,
+      "maxRepairRounds": 4,
+      "malformedVerdict": "continue",
+      "requireFreshClosureReviewer": true
+    },
+    "defaultValidationCommands": [],
+    "finalValidationCommands": [
+      "npm run check",
+      "npm test"
+    ],
+    "continuationPolicy": {
+      "reaperEnabled": true,
+      "reaperPollIntervalMs": 5000,
+      "heartbeatStopTimeoutMs": 5000,
+      "bestEffortCompletion": false,
+      "maxWorkerReflections": 3
+    }
+  },
+  "stages": [
+    {
+      "id": "research",
+      "type": "review",
+      "needs": [],
+      "isolation": "readonly",
+      "prompt": "Read the approved plan at serial-golden.plan.md, docs/VISION.md, docs/ARCHI.md, and repository instructions. Confirm the implementation slices, dependencies, risks, and path contracts. Do not edit files. Return a concise context handoff.",
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "outputs": [],
+      "required": true,
+      "parallel": false,
+      "allowedPaths": [],
+      "claimedPaths": [],
+      "validationCommands": []
+    },
+    {
+      "id": "implement-slice-1-types",
+      "type": "implementation",
+      "needs": [
+        "research"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan serial-golden.plan.md.\n\nSLICE\nSlice 1 — Types\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- src/types.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- Types compile.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: `src/types.ts`\n\n**Parallel-safe**: no\n\nAdd the types.\n\n**Acceptance Criteria**:\n- Types compile.\n\n**Targeted Validation**:\n```sh\nnpm run check\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "src/**"
+      ],
+      "claimedPaths": [
+        "src/types.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-2-runtime",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-1-types"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan serial-golden.plan.md.\n\nSLICE\nSlice 2 — Runtime\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- src/**\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- src/runtime.ts\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- Runtime uses the new types.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: `src/runtime.ts`\n\n**Parallel-safe**: yes\n\n**Needs**:\n- Slice 1 — Types\n\nWire the runtime.\n\n**Acceptance Criteria**:\n- Runtime uses the new types.\n\n**Targeted Validation**:\n```sh\nnpm run check\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "src/**"
+      ],
+      "claimedPaths": [
+        "src/runtime.ts"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "implement-slice-3-docs",
+      "type": "implementation",
+      "needs": [
+        "implement-slice-2-runtime"
+      ],
+      "isolation": "same-checkout",
+      "parallel": false,
+      "prompt": "Implement one frozen slice from the approved plan serial-golden.plan.md.\n\nSLICE\nSlice 3 — Docs\n\nPATH CONTRACT\nAllowed paths (your editable boundary — you may create, edit, or extend ANY file that matches these):\n- docs/**\n\nPrimary files to implement (start here — a starting list, not a hard limit within the allowed boundary):\n- docs/GUIDE.md\n\nWORKING TREE\nThis stage runs in the shared checkout, after earlier stages in the chain. Uncommitted changes already present in the working tree — schema edits, generated code, fixtures, and helpers produced by prior stages — are EXPECTED and IN-CONTRACT. Inspect them, build on top of them, and keep them. Do NOT treat pre-existing changes as foreign, \"host-owned\", out-of-scope, or a reason to pause or block; the runtime owns the commit, not you. Your job is to make the working tree under your allowed paths satisfy the acceptance criteria and return a verified complete.\n\nACCEPTANCE CRITERIA\n- Guide mentions the new types.\n\nRULES\n- Read docs/VISION.md, docs/ARCHI.md, and repository instructions first when present.\n- Your allowed paths are your full editable scope; editing any file that matches them is in-contract and needs no decision or escalation.\n- When your change ripples into sibling files inside the allowed paths (shared fixtures, generated code, related tests), update them so the stage's tests pass — do not stop at the primary files and do not pause for permission.\n- Implement behavioral tests for new logic when the plan requires them.\n- Do not commit, tag, merge, push, or alter Git configuration.\n- Return needs_decision ONLY for a genuine product or architecture choice. Never return needs_decision or blocked for path scope, for editing an allowed sibling file, or because the working tree already contains related changes.\n- A prose report is not completion. End with one structured status.\n\nPLAN SECTION\n**Files**: `docs/GUIDE.md`\n\n**Parallel-safe**: yes\n\n**Needs**:\n- Slice 2 — Runtime\n\nDocument the change.\n\n**Acceptance Criteria**:\n- Guide mentions the new types.\n\n**Targeted Validation**:\n```sh\nnpm test\n```\n\nFINAL RESPONSE\n<status>complete|continue|blocked|needs_decision</status>\n<risk>low|medium|high|critical</risk>\n<rationale>what was done or why more work is needed</rationale>\n<missingItems>remaining items</missingItems>\n<recommendedFollowupPrompt>focused next action</recommendedFollowupPrompt>",
+      "allowedPaths": [
+        "docs/**"
+      ],
+      "claimedPaths": [
+        "docs/GUIDE.md"
+      ],
+      "outputs": [],
+      "validationCommands": [
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true
+    },
+    {
+      "id": "integrate",
+      "type": "integration",
+      "needs": [
+        "implement-slice-3-docs"
+      ],
+      "isolation": "same-checkout",
+      "integrationStrategy": "same-checkout-finalize",
+      "prompt": "Integrate and finalize the approved implementation from serial-golden.plan.md. Do not introduce new scope. Resolve only in-contract integration issues, run the final quality gates, and leave commit creation to the Prompt-chain hybrid runtime.",
+      "allowedPaths": [
+        "docs/**",
+        "src/**"
+      ],
+      "claimedPaths": [],
+      "outputs": [],
+      "validationCommands": [
+        "npm run check",
+        "npm test"
+      ],
+      "allowedTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "required": true,
+      "parallel": false
+    }
+  ]
+}

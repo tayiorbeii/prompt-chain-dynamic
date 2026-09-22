@@ -1,6 +1,12 @@
 export type StageType = "review" | "implementation" | "integration";
 export type StageIsolation = "readonly" | "same-checkout" | "worktree";
-export type IntegrationStrategy = "same-checkout-finalize" | "worktree-fan-in";
+/**
+ * "worktree-wave-checkpoint" is a deterministic stage between waves: it folds
+ * one wave's verified worktree patches into a checkpoint ref that the next
+ * wave's worktrees branch from. It never commits to the branch.
+ */
+export type IntegrationStrategy = "same-checkout-finalize" | "worktree-fan-in" | "worktree-wave-checkpoint";
+export type ManifestTopology = "readonly-only" | "same-checkout-serial" | "worktree-fanout" | "mixed";
 export type DecisionMode = "agent" | "human";
 export type ReviewStatus = "complete" | "continue" | "blocked" | "needs_decision";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -122,7 +128,7 @@ export interface ManifestMetadata {
   sourceGuide?: string;
   generatedAt?: string;
   requestedMode?: "auto" | "serial" | "parallel";
-  selectedTopology?: "readonly-only" | "same-checkout-serial" | "worktree-fanout";
+  selectedTopology?: ManifestTopology;
   topologyReasons?: string[];
   authorWarnings?: string[];
   unresolvedSections?: string[];
@@ -186,6 +192,12 @@ export interface TripStage {
   validationCommands?: string[];
   allowedTools?: string[];
   integrationStrategy?: IntegrationStrategy;
+  /** Id of the wave checkpoint stage whose verified commit is this stage's worktree base; unset means the run base revision. */
+  baseFrom?: string;
+  /** Dependency wave index assigned by the compiler in waves mode (1-based). */
+  wave?: number;
+  /** Why the compiler serialized this stage instead of isolating it in a worktree. */
+  schedulingNotes?: string[];
 }
 
 export interface TripManifest {
@@ -381,7 +393,7 @@ export interface ManifestValidationIssue {
 
 export interface ManifestValidationResult {
   valid: boolean;
-  topology?: "readonly-only" | "same-checkout-serial" | "worktree-fanout";
+  topology?: ManifestTopology;
   issues: ManifestValidationIssue[];
   normalized?: TripManifest;
 }

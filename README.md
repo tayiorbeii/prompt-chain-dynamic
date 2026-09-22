@@ -284,6 +284,10 @@ Parallel implementation is accepted only when the compiler and validator establi
 
 The runtime creates the worktrees itself and passes their exact `cwd` to `WorkflowAgent`. It intentionally does not use dynamic-workflows' throwaway worktree option for implementation writers.
 
+### Waves (opt-in)
+
+Compile with `--waves` to group writers into dependency waves instead of deciding parallelism for the whole plan at once. Declared `Needs` never serialize anything; they place a slice in a later wave. A wave fans out into worktrees when every member declares parallel safety, no claims overlap inside the wave, no claim is a high-risk path, and the wave has a checkpoint base to branch from (wave 1 uses the run base; later waves need the previous wave to have checkpointed). Such a wave compiles to worktree writers plus a deterministic `checkpoint-wave-N` stage with strategy `worktree-wave-checkpoint`; other waves compile to same-checkout writers, each carrying `schedulingNotes` that say why. A manifest with any checkpoint stage has topology `mixed`, its final `integrate` stage uses `same-checkout-finalize`, and only that final stage runs the final validation commands. `--mode serial` and plain `--mode auto` are unchanged; a serial golden fixture pins that. Runtime execution of checkpoint stages lands in a later slice, so keep `--waves` off for real runs until then.
+
 ## Validation
 
 ```sh

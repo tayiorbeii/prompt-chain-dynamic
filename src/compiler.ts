@@ -23,9 +23,25 @@ export interface CompileOptions {
    * parallel-safety analysis are unchanged.
    */
   pathPolicy?: "permissive" | "strict";
+  /**
+   * Wave-aware compilation. Writers are grouped into dependency waves; a wave
+   * whose slices all declare parallel safety with non-overlapping, low-risk
+   * claims becomes worktree writers plus a deterministic wave checkpoint that
+   * later waves branch from. Off by default until the runtime executes waves;
+   * with it off every mode compiles exactly as before.
+   */
+  waves?: boolean;
 }
 
 type PathPolicy = NonNullable<CompileOptions["pathPolicy"]>;
+type Topology = "same-checkout-serial" | "worktree-fanout" | "mixed";
+
+interface StagePlan {
+  slice: PlanSlice;
+  wave: number;
+  isolation: "same-checkout" | "worktree";
+  notes: string[];
+}
 
 /**
  * Directory globs for the claimed paths, used as the permissive default
@@ -91,26 +107,44 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
 
   const requestedMode = options.mode ?? "auto";
   const blockers = parallelBlockers(runnableSlices);
-  let selectedTopology: "same-checkout-serial" | "worktree-fanout";
+  let selectedTopology: Topology;
+  let topologyReasons: string[];
+  let wavePlans: StagePlan[] | undefined;
   if (requestedMode === "parallel") {
     if (blockers.length) throw new Error(`forced parallel mode rejected:\n${blockers.map((value) => `- ${value}`).join("\n")}`);
     selectedTopology = "worktree-fanout";
+    topologyReasons = FANOUT_REASONS;
   } else if (requestedMode === "serial") {
     selectedTopology = "same-checkout-serial";
+    topologyReasons = blockers;
+  } else if (options.waves) {
+    const waves = planWaves(runnableSlices);
+    selectedTopology = waves.topology;
+    topologyReasons = waves.topology === "worktree-fanout" ? FANOUT_REASONS : waves.reasons;
+    // Plain fan-out keeps the legacy shape; serial and mixed use the wave builder,
+    // which chains same-checkout writers per wave so a declared fan-in stays valid.
+    if (waves.topology !== "worktree-fanout") wavePlans = waves.plans;
   } else {
     selectedTopology = blockers.length ? "same-checkout-serial" : "worktree-fanout";
+    topologyReasons = selectedTopology === "worktree-fanout" ? FANOUT_REASONS : blockers;
   }
 
   const finalValidationCommands = await discoverFinalValidationCommands(workingDirectory, markdown);
-  const stages = buildStages(runnableSlices, selectedTopology, finalValidationCommands, path.relative(workingDirectory, planPath));
+  const sourceGuide = path.relative(workingDirectory, planPath);
+  const stages = wavePlans
+    ? buildWaveStages(wavePlans, finalValidationCommands, sourceGuide)
+    : buildStages(runnableSlices, selectedTopology === "mixed" ? "same-checkout-serial" : selectedTopology, finalValidationCommands, sourceGuide);
   const warnings = [
     ...unresolved.map((slice) => `${slice.title}: ${slice.unresolvedReasons.join("; ")}`),
     ...emptyValidation.map((slice) => `${slice.title}: Targeted Validation fence yielded no commands; the stage has no validation commands`),
     ...runnableSlices
       .filter((slice) => !slice.emptyValidationLabel && slice.validationSource !== "fence")
       .map((slice) => `${slice.title}: no Targeted Validation fence; ${slice.validationSource === "loose" ? "validation commands came from the loose line scan" : "the stage has no validation commands"}`),
-    ...(selectedTopology === "same-checkout-serial" && blockers.length
+    ...(selectedTopology === "same-checkout-serial" && blockers.length && !options.waves
       ? blockers.map((value) => `serialized: ${value}`)
+      : []),
+    ...(options.waves && selectedTopology !== "worktree-fanout"
+      ? topologyReasons.map((value) => `serialized: ${value}`)
       : []),
   ];
   const manifest: TripManifest = {
@@ -123,9 +157,7 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
       generatedAt: new Date().toISOString(),
       requestedMode,
       selectedTopology,
-      topologyReasons: selectedTopology === "worktree-fanout"
-        ? ["All implementation slices explicitly declared parallel safety", "Concrete claims are non-overlapping", "No high-risk shared path was detected"]
-        : blockers,
+      topologyReasons,
       authorWarnings: warnings,
       unresolvedSections: unresolved.map((slice) => slice.title),
       sourcePlanHash: digest(markdown),
@@ -203,7 +235,9 @@ function parseSlices(markdown: string, pathPolicy: PathPolicy = "permissive"): P
     const validation = sliceValidationCommands(section.body);
     const needs = extractListUnderLabel(section.body, ["Needs", "Dependencies"]).map(slug);
     const acceptanceCriteria = extractListUnderLabel(section.body, ["Acceptance criteria", "Acceptance Criteria", "Test Impact"]);
-    const parallelDeclared = /(?:parallel[- ]safe|parallel safety)\s*(?::|\*\*)?\s*(?:yes|true|independent)/i.test(section.body)
+    // Accepts the documented bold form (**Parallel-safe**: yes), the
+    // bold-with-colon form (**Parallel-safe:** yes) and the bare form.
+    const parallelDeclared = /(?:parallel[- ]safe|parallel safety)\*{0,2}\s*:?\s*\*{0,2}\s*(?:yes|true|independent)\b/i.test(section.body)
       || /\[parallel\]/i.test(section.title);
     const highRiskPaths = claimedPaths.filter(isHighRiskPath);
     const unresolvedReasons = claimedPaths.length ? [] : ["no concrete repository path found"];
@@ -286,6 +320,177 @@ function buildStages(
     allowedTools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
   };
   return [research, ...implementation, integration];
+}
+
+const FANOUT_REASONS = [
+  "All implementation slices explicitly declared parallel safety",
+  "Concrete claims are non-overlapping",
+  "No high-risk shared path was detected",
+];
+
+/** Longest dependency path among writer slices, 1-based; unresolved needs are ignored here and reported by validation. */
+function computeWaves(slices: PlanSlice[]): Map<string, number> {
+  const byId = new Map(slices.map((slice) => [slice.id, slice]));
+  const memo = new Map<string, number>();
+  const visiting = new Set<string>();
+  const depth = (slice: PlanSlice): number => {
+    const known = memo.get(slice.id);
+    if (known !== undefined) return known;
+    if (visiting.has(slice.id)) return 1;
+    visiting.add(slice.id);
+    let value = 1;
+    for (const need of slice.needs) {
+      const dependency = byId.get(`implement-${need}`.slice(0, 72));
+      if (dependency) value = Math.max(value, depth(dependency) + 1);
+    }
+    visiting.delete(slice.id);
+    memo.set(slice.id, value);
+    return value;
+  };
+  for (const slice of slices) depth(slice);
+  return memo;
+}
+
+/**
+ * Wave-aware topology. A wave fans out into worktrees only when every member
+ * declares parallel safety, no claims overlap inside the wave, no claim is a
+ * high-risk path, and the wave has a checkpoint base to branch from (wave 1
+ * uses the run base; later waves need the previous wave to have checkpointed).
+ * Declared dependencies never serialize anything: they only place a slice in a
+ * later wave. Every serialized slice records why.
+ */
+function planWaves(slices: PlanSlice[]): { plans: StagePlan[]; topology: Topology; reasons: string[] } {
+  const waves = computeWaves(slices);
+  const waveCount = Math.max(1, ...waves.values());
+  const plans: StagePlan[] = [];
+  const reasons: string[] = [];
+  let previousWaveCheckpointed = true;
+  let anyWorktree = false;
+  for (let wave = 1; wave <= waveCount; wave += 1) {
+    const members = slices.filter((slice) => waves.get(slice.id) === wave);
+    const waveBlockers: string[] = [
+      ...(previousWaveCheckpointed ? [] : [`wave ${wave} follows a shared-checkout wave, so no checkpoint base exists for isolated worktrees`]),
+      ...parallelBlockers(members).filter((blocker) => !/declares dependencies/.test(blocker)),
+    ];
+    const worktree: boolean = waveBlockers.length === 0;
+    anyWorktree ||= worktree;
+    for (const slice of members) {
+      const notes = worktree
+        ? []
+        : waveBlockers.filter((blocker) => blocker.includes(slice.title) || !members.some((other) => blocker.includes(other.title)));
+      plans.push({ slice, wave, isolation: worktree ? "worktree" : "same-checkout", notes });
+    }
+    if (!worktree) reasons.push(...waveBlockers.map((blocker) => `wave ${wave}: ${blocker}`));
+    previousWaveCheckpointed = worktree;
+  }
+  const topology: Topology = !anyWorktree ? "same-checkout-serial" : waveCount === 1 ? "worktree-fanout" : "mixed";
+  return { plans, topology, reasons };
+}
+
+function buildWaveStages(plans: StagePlan[], finalValidationCommands: string[], sourceGuide: string): TripStage[] {
+  const research = researchStage(sourceGuide);
+  const stages: TripStage[] = [research];
+  let anchor = research.id;
+  let previousCheckpoint: string | undefined;
+  const waveCount = Math.max(...plans.map((plan) => plan.wave));
+  for (let wave = 1; wave <= waveCount; wave += 1) {
+    const members = plans.filter((plan) => plan.wave === wave);
+    if (!members.length) continue;
+    const declaredNeeds = (plan: StagePlan): string[] => [...new Set(plan.slice.needs.map((need) => `implement-${need}`))];
+    if (members.every((plan) => plan.isolation === "worktree")) {
+      const writerIds: string[] = [];
+      for (const plan of members) {
+        stages.push({
+          ...writerStage(plan.slice, sourceGuide, "worktree", [...new Set([anchor, ...declaredNeeds(plan)])]),
+          parallel: true,
+          baseFrom: previousCheckpoint,
+          wave,
+          schedulingNotes: [],
+        });
+        writerIds.push(plan.slice.id);
+      }
+      const checkpoint: TripStage = {
+        id: `checkpoint-wave-${wave}`,
+        type: "integration",
+        needs: writerIds,
+        isolation: "same-checkout",
+        integrationStrategy: "worktree-wave-checkpoint",
+        baseFrom: previousCheckpoint,
+        wave,
+        prompt: `Deterministic wave ${wave} checkpoint: apply the verified worktree patches of this wave, run their validation commands, and record a checkpoint ref for the next wave. No agent runs for this stage.`,
+        allowedPaths: [...new Set(members.flatMap((plan) => plan.slice.allowedPaths))].sort(),
+        claimedPaths: [],
+        outputs: [],
+        validationCommands: [...new Set(members.flatMap((plan) => plan.slice.validationCommands))],
+        allowedTools: ["read"],
+      };
+      stages.push(checkpoint);
+      anchor = checkpoint.id;
+      previousCheckpoint = checkpoint.id;
+    } else {
+      for (const plan of members) {
+        stages.push({
+          ...writerStage(plan.slice, sourceGuide, "same-checkout", [...new Set([anchor, ...declaredNeeds(plan)])]),
+          parallel: false,
+          wave,
+          schedulingNotes: plan.notes.map((note) => `serialized: ${note}`),
+        });
+        anchor = plan.slice.id;
+      }
+    }
+  }
+  stages.push(integrationStage(plans.map((plan) => plan.slice), [anchor], "same-checkout-finalize", finalValidationCommands, sourceGuide));
+  return stages;
+}
+
+function researchStage(sourceGuide: string): TripStage {
+  return {
+    id: "research",
+    type: "review",
+    needs: [],
+    isolation: "readonly",
+    prompt: `Read the approved plan at ${sourceGuide}, docs/VISION.md, docs/ARCHI.md, and repository instructions. Confirm the implementation slices, dependencies, risks, and path contracts. Do not edit files. Return a concise context handoff.`,
+    allowedTools: ["read", "grep", "find", "ls"],
+    outputs: [],
+  };
+}
+
+function writerStage(slice: PlanSlice, sourceGuide: string, isolation: "same-checkout" | "worktree", needs: string[]): TripStage {
+  return {
+    id: slice.id,
+    type: "implementation",
+    needs,
+    isolation,
+    parallel: isolation === "worktree",
+    prompt: buildSlicePrompt(slice, sourceGuide, isolation === "worktree" ? "worktree-fanout" : "same-checkout-serial"),
+    allowedPaths: slice.allowedPaths,
+    claimedPaths: slice.claimedPaths,
+    outputs: [],
+    validationCommands: slice.validationCommands,
+    allowedTools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
+  };
+}
+
+function integrationStage(
+  slices: PlanSlice[],
+  needs: string[],
+  integrationStrategy: TripStage["integrationStrategy"],
+  finalValidationCommands: string[],
+  sourceGuide: string,
+): TripStage {
+  return {
+    id: "integrate",
+    type: "integration",
+    needs,
+    isolation: "same-checkout",
+    integrationStrategy,
+    prompt: `Integrate and finalize the approved implementation from ${sourceGuide}. Do not introduce new scope. Resolve only in-contract integration issues, run the final quality gates, and leave commit creation to the Prompt-chain hybrid runtime.`,
+    allowedPaths: [...new Set(slices.flatMap((slice) => slice.allowedPaths))].sort(),
+    claimedPaths: [],
+    outputs: [],
+    validationCommands: finalValidationCommands,
+    allowedTools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
+  };
 }
 
 function buildSlicePrompt(

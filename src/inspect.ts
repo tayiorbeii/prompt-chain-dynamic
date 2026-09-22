@@ -11,7 +11,16 @@ export function describeManifest(manifest: TripManifest): string {
     "",
     "Graph:",
   ];
-  for (const stage of manifest.stages) lines.push(`  ${stage.id} [${stage.type}/${stage.isolation}] <- ${stage.needs.join(", ") || "root"}`);
+  for (const stage of manifest.stages) {
+    const detail = [
+      `${stage.type}/${stage.isolation}`,
+      stage.integrationStrategy,
+      stage.wave !== undefined ? `wave ${stage.wave}` : undefined,
+      stage.baseFrom ? `base ${stage.baseFrom}` : stage.isolation === "worktree" ? "base run" : undefined,
+    ].filter(Boolean).join(" ");
+    lines.push(`  ${stage.id} [${detail}] <- ${stage.needs.join(", ") || "root"}`);
+    for (const note of stage.schedulingNotes ?? []) lines.push(`      note: ${note}`);
+  }
   const writers = manifest.stages.filter((stage) => stage.type === "implementation");
   if (writers.length) {
     lines.push("", "Path claims:");

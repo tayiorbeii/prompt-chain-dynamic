@@ -28,8 +28,11 @@ const DEFAULT_SETTINGS: Required<Pick<TripSettings,
 export function normalizeManifest(input: TripManifest): TripManifest {
   const stages = input.stages.map(normalizeStage);
   const writerIsolation = new Set(stages.filter((stage) => stage.type === "implementation").map((stage) => stage.isolation));
-  const integration = stages.find((stage) => stage.type === "integration");
-  const inferredStrategy = writerIsolation.has("worktree") ? "worktree-fan-in" : "same-checkout-finalize";
+  const hasWaveCheckpoint = stages.some((stage) => stage.integrationStrategy === "worktree-wave-checkpoint");
+  // The final integration stage is the last non-checkpoint integration; wave
+  // checkpoints always carry their strategy explicitly.
+  const integration = [...stages].reverse().find((stage) => stage.type === "integration" && stage.integrationStrategy !== "worktree-wave-checkpoint");
+  const inferredStrategy = hasWaveCheckpoint || !writerIsolation.has("worktree") ? "same-checkout-finalize" : "worktree-fan-in";
   return {
     ...input,
     workingDirectory: input.workingDirectory.trim(),
@@ -194,12 +197,19 @@ function validateStage(stage: TripStage, base: string, issues: ManifestValidatio
   }
 }
 
+function isWaveCheckpoint(stage: TripStage): boolean {
+  return stage.type === "integration" && stage.integrationStrategy === "worktree-wave-checkpoint";
+}
+
 function classifyTopology(stages: TripStage[], issues: ManifestValidationIssue[]): ManifestValidationResult["topology"] {
   const writers = stages.filter((stage) => stage.type === "implementation");
   if (!writers.length) return "readonly-only";
+  // Any manifest with a wave checkpoint is mixed, even when every writer sits
+  // in one qualifying wave, so the fan-out label never coexists with one.
+  if (stages.some(isWaveCheckpoint)) return "mixed";
   const isolation = new Set(writers.map((stage) => stage.isolation));
   if (isolation.size > 1) {
-    issue(issues, "stages", "mixed same-checkout/worktree writer graphs are not supported");
+    issue(issues, "stages", "mixed same-checkout/worktree writer graphs require wave checkpoint stages (compile with --waves)");
     return undefined;
   }
   return isolation.has("worktree") ? "worktree-fanout" : "same-checkout-serial";
@@ -212,19 +222,24 @@ function validateIntegration(
 ): void {
   const writers = stages.filter((stage) => stage.type === "implementation");
   const integrations = stages.filter((stage) => stage.type === "integration");
+  const checkpoints = integrations.filter(isWaveCheckpoint);
+  const finals = integrations.filter((stage) => !isWaveCheckpoint(stage));
   if (!writers.length && integrations.length) {
     issue(issues, "stages", "an integration stage without writer stages is unnecessary", "warning");
   }
-  if (writers.length && integrations.length !== 1) {
-    issue(issues, "stages", "writer graphs require exactly one integration stage");
+  if (writers.length && finals.length !== 1) {
+    issue(issues, "stages", "writer graphs require exactly one final integration stage");
     return;
   }
-  const integration = integrations[0];
+  const integration = finals[0];
   if (!integration) return;
+  // The expected-strategy check targets the final non-checkpoint integration;
+  // mixed manifests finalize in the shared checkout.
   const expected = topology === "worktree-fanout" ? "worktree-fan-in" : "same-checkout-finalize";
   if (integration.integrationStrategy !== expected) {
     issue(issues, "stages", `integrationStrategy must be ${expected} for topology ${topology}`);
   }
+  if (topology === "mixed") validateWaveCheckpoints(stages, checkpoints, issues);
   const descendants = findDescendants(integration.id, stages);
   if ([...descendants].some((id) => stages.find((stage) => stage.id === id)?.type === "implementation")) {
     issue(issues, "stages", "writer stages may not occur after integration");
@@ -244,6 +259,42 @@ function validateIntegration(
   }
 }
 
+/**
+ * Wave checkpoints make the "dependent worktree waves" rule safe: each
+ * checkpoint must fold exactly the worktree writers that share its base, and
+ * every later-wave worktree writer must name the checkpoint it branches from.
+ */
+function validateWaveCheckpoints(stages: TripStage[], checkpoints: TripStage[], issues: ManifestValidationIssue[]): void {
+  const byId = new Map(stages.map((stage) => [stage.id, stage]));
+  const validBase = (stage: TripStage): boolean => {
+    if (!stage.baseFrom) return true;
+    const base = byId.get(stage.baseFrom);
+    if (!base || !isWaveCheckpoint(base) || !isAncestor(stage.baseFrom, stage.id, stages)) {
+      issue(issues, `stages.${stage.id}.baseFrom`, `baseFrom must name an earlier wave checkpoint stage: ${stage.baseFrom}`);
+      return false;
+    }
+    return true;
+  };
+  for (const checkpoint of checkpoints) {
+    validBase(checkpoint);
+    const writerDeps = checkpoint.needs.map((id) => byId.get(id)).filter((stage): stage is TripStage => stage?.type === "implementation");
+    if (!writerDeps.length) issue(issues, `stages.${checkpoint.id}.needs`, "a wave checkpoint must depend on at least one worktree writer");
+    for (const writer of writerDeps) {
+      if (writer.isolation !== "worktree") issue(issues, `stages.${checkpoint.id}.needs`, `wave checkpoint ${checkpoint.id} folds only worktree writers; ${writer.id} is ${writer.isolation}`);
+      if ((writer.baseFrom ?? null) !== (checkpoint.baseFrom ?? null)) {
+        issue(issues, `stages.${writer.id}.baseFrom`, `worktree writers in one wave must share the checkpoint's base; ${writer.id} has ${writer.baseFrom ?? "the run base"} but ${checkpoint.id} has ${checkpoint.baseFrom ?? "the run base"}`);
+      }
+    }
+  }
+  for (const writer of stages.filter((stage) => stage.type === "implementation" && stage.isolation === "worktree")) {
+    if (!validBase(writer)) continue;
+    const dependsOnWriter = [...findAncestors(writer.id, stages)].some((id) => byId.get(id)?.type === "implementation");
+    if (dependsOnWriter && !writer.baseFrom) {
+      issue(issues, `stages.${writer.id}.baseFrom`, `worktree writer ${writer.id} depends on earlier writers but names no wave checkpoint base`);
+    }
+  }
+}
+
 function validateWorktreeClaims(stages: TripStage[], issues: ManifestValidationIssue[]): void {
   const writers = stages.filter((stage) => stage.type === "implementation" && stage.isolation === "worktree");
   for (let left = 0; left < writers.length; left += 1) {
@@ -251,6 +302,9 @@ function validateWorktreeClaims(stages: TripStage[], issues: ManifestValidationI
       const a = writers[left];
       const b = writers[right];
       if (!a || !b) continue;
+      // Overlap only matters within one wave. A later wave legitimately touches
+      // files an earlier wave changed; its base already contains them.
+      if ((a.baseFrom ?? null) !== (b.baseFrom ?? null)) continue;
       for (const claimA of a.claimedPaths ?? []) {
         for (const claimB of b.claimedPaths ?? []) {
           if (pathsMayOverlap(claimA, claimB)) {
@@ -267,13 +321,24 @@ function validateSameCheckoutOrder(
   topology: ManifestValidationResult["topology"],
   issues: ManifestValidationIssue[],
 ): void {
-  if (topology !== "same-checkout-serial") return;
-  const writers = stages.filter((stage) => stage.type === "implementation");
-  for (let index = 1; index < writers.length; index += 1) {
-    const previous = writers[index - 1];
-    const current = writers[index];
-    if (previous && current && !isAncestor(previous.id, current.id, stages)) {
-      issue(issues, `stages.${current.id}.needs`, `same-checkout writers must be linearly ordered; ${current.id} must depend on ${previous.id}`);
+  if (topology !== "same-checkout-serial" && topology !== "mixed") return;
+  // In a mixed manifest the linear-order rule applies per wave: same-checkout
+  // writers that share the same nearest checkpoint ancestor form one group.
+  const groups = new Map<string, TripStage[]>();
+  for (const writer of stages.filter((stage) => stage.type === "implementation" && stage.isolation === "same-checkout")) {
+    const checkpointAncestors = [...findAncestors(writer.id, stages)]
+      .map((id) => stages.findIndex((stage) => stage.id === id && isWaveCheckpoint(stage)))
+      .filter((index) => index >= 0);
+    const key = checkpointAncestors.length ? stages[Math.max(...checkpointAncestors)]!.id : "root";
+    groups.set(key, [...(groups.get(key) ?? []), writer]);
+  }
+  for (const writers of groups.values()) {
+    for (let index = 1; index < writers.length; index += 1) {
+      const previous = writers[index - 1];
+      const current = writers[index];
+      if (previous && current && !isAncestor(previous.id, current.id, stages)) {
+        issue(issues, `stages.${current.id}.needs`, `same-checkout writers must be linearly ordered; ${current.id} must depend on ${previous.id}`);
+      }
     }
   }
 }

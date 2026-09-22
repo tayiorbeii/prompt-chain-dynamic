@@ -8,7 +8,7 @@
       "version": "0.1.0"
     },
     "sourceGuide": "docs/plans/review-fixes.plan.md",
-    "generatedAt": "2026-09-22T22:25:30.849Z",
+    "generatedAt": "2026-09-22T23:41:34.728Z",
     "requestedMode": "auto",
     "selectedTopology": "same-checkout-serial",
     "topologyReasons": [
@@ -283,7 +283,7 @@
       "engine": "pi-dynamic-workflows",
       "version": "3.0.0"
     },
-    "contractHash": "sha256:aa4df78177369435c627321da1009c22a1351d336df99e932dbae8f795bb1c74"
+    "contractHash": "sha256:fbe1f43c516fc65e50c92784353867201d8e2fd24c8b252c2cd0a5947a8a34b9"
   },
   "settings": {
     "maxParallel": 4,
@@ -313,7 +313,8 @@
       "reaperEnabled": true,
       "reaperPollIntervalMs": 5000,
       "heartbeatStopTimeoutMs": 5000,
-      "bestEffortCompletion": false
+      "bestEffortCompletion": false,
+      "maxWorkerReflections": 3
     }
   },
   "stages": [

@@ -1124,6 +1124,21 @@ async function resolveDecision(
   return recommendation.implementationDirection ?? recommendation.choice ?? recommendation.rationale;
 }
 
+/**
+ * A stage runs its own commands (or the manifest defaults). Integration stages
+ * add the final validation commands, except wave checkpoints, which are
+ * intermediate and run only their writers' commands.
+ */
+export function validationCommandsFor(manifest: TripManifest, stage: TripStage, integration: boolean): string[] {
+  const finalCommands = integration && stage.integrationStrategy !== "worktree-wave-checkpoint"
+    ? manifest.settings?.finalValidationCommands ?? []
+    : [];
+  return unique([
+    ...(stage.validationCommands?.length ? stage.validationCommands : manifest.settings?.defaultValidationCommands ?? []),
+    ...finalCommands,
+  ]);
+}
+
 async function validateStage(
   context: RunnerContext,
   stage: TripStage,
@@ -1132,10 +1147,7 @@ async function validateStage(
   integration: boolean,
   attemptNum: number,
 ): Promise<ValidationResult[]> {
-  const commands = unique([
-    ...(stage.validationCommands?.length ? stage.validationCommands : context.manifest.settings?.defaultValidationCommands ?? []),
-    ...(integration ? context.manifest.settings?.finalValidationCommands ?? [] : []),
-  ]);
+  const commands = validationCommandsFor(context.manifest, stage, integration);
   if (!commands.length && !integration && attemptNum === 1) {
     await emit(context, "stage.validation.none", `Stage ${stage.id} declares no validation commands; reviewers will see no deterministic evidence`, stage.id);
   }

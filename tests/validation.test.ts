@@ -88,3 +88,59 @@ test("rejects claims without allowed paths", () => {
   assert.equal(result.valid, false);
   assert.ok(result.issues.some((issue) => issue.path.includes("allowedPaths")));
 });
+
+// --- Slice 6: mixed manifests with wave checkpoints ---
+
+function mixedManifest(): TripManifest {
+  return {
+    schemaVersion: 1,
+    name: "Mixed",
+    workingDirectory: process.cwd(),
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      { id: "a", type: "implementation", needs: ["research"], isolation: "worktree", prompt: "A", allowedPaths: ["src/**"], claimedPaths: ["src/a.ts"] },
+      { id: "b", type: "implementation", needs: ["research"], isolation: "worktree", prompt: "B", allowedPaths: ["src/**"], claimedPaths: ["src/b.ts"] },
+      { id: "checkpoint-wave-1", type: "integration", needs: ["a", "b"], isolation: "same-checkout", integrationStrategy: "worktree-wave-checkpoint", prompt: "Checkpoint", allowedPaths: ["src/**"], validationCommands: ["true"] },
+      { id: "c", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "same-checkout", prompt: "C", allowedPaths: ["src/**"], claimedPaths: ["src/c.ts"] },
+      { id: "integrate", type: "integration", needs: ["c"], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate", allowedPaths: ["src/**"] },
+    ],
+  };
+}
+
+test("accepts a mixed manifest with a wave checkpoint and a later same-checkout wave", () => {
+  const result = validateManifest(mixedManifest());
+  assert.deepEqual(result.issues.filter((entry) => entry.severity === "error"), []);
+  assert.equal(result.topology, "mixed");
+});
+
+test("accepts a later-wave worktree writer whose claims overlap an earlier wave", () => {
+  const manifest = mixedManifest();
+  manifest.stages.splice(4, 1,
+    { id: "c", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "worktree", baseFrom: "checkpoint-wave-1", prompt: "C", allowedPaths: ["src/**"], claimedPaths: ["src/a.ts"] },
+    { id: "d", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "worktree", baseFrom: "checkpoint-wave-1", prompt: "D", allowedPaths: ["src/**"], claimedPaths: ["src/d.ts"] },
+    { id: "checkpoint-wave-2", type: "integration", needs: ["c", "d"], isolation: "same-checkout", integrationStrategy: "worktree-wave-checkpoint", baseFrom: "checkpoint-wave-1", prompt: "Checkpoint 2", allowedPaths: ["src/**"] },
+  );
+  manifest.stages[manifest.stages.length - 1]!.needs = ["checkpoint-wave-2"];
+  const result = validateManifest(manifest);
+  assert.deepEqual(result.issues.filter((entry) => entry.severity === "error"), []);
+});
+
+test("rejects a worktree writer whose base is not an earlier wave checkpoint", () => {
+  const manifest = mixedManifest();
+  manifest.stages.splice(4, 1, { id: "c", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "worktree", baseFrom: "research", prompt: "C", allowedPaths: ["src/**"], claimedPaths: ["src/c.ts"] });
+  const result = validateManifest(manifest);
+  assert.ok(result.issues.some((entry) => /baseFrom must name an earlier wave checkpoint stage: research/.test(entry.message)), JSON.stringify(result.issues));
+});
+
+test("rejects two worktree writers in one wave with different bases", () => {
+  const manifest = mixedManifest();
+  manifest.stages.splice(4, 1,
+    { id: "c", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "worktree", baseFrom: "checkpoint-wave-1", prompt: "C", allowedPaths: ["src/**"], claimedPaths: ["src/c.ts"] },
+    { id: "d", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "worktree", prompt: "D", allowedPaths: ["src/**"], claimedPaths: ["src/d.ts"] },
+    { id: "checkpoint-wave-2", type: "integration", needs: ["c", "d"], isolation: "same-checkout", integrationStrategy: "worktree-wave-checkpoint", baseFrom: "checkpoint-wave-1", prompt: "Checkpoint 2", allowedPaths: ["src/**"] },
+  );
+  manifest.stages[manifest.stages.length - 1]!.needs = ["checkpoint-wave-2"];
+  const result = validateManifest(manifest);
+  assert.ok(result.issues.some((entry) => /worktree writers in one wave must share the checkpoint's base; d has the run base/.test(entry.message)), JSON.stringify(result.issues));
+  assert.ok(result.issues.some((entry) => /depends on earlier writers but names no wave checkpoint base/.test(entry.message)));
+});

@@ -389,3 +389,176 @@ npm test
   assert.deepEqual(writer?.claimedPaths, ["src/a.ts", "tests/a.test.ts"]);
   assert.deepEqual(writer?.allowedPaths, ["src/**", "tests/**"]);
 });
+
+// --- Slice 6: wave-aware compilation behind a flag ---
+
+const WAVE_PLAN = `# Waves
+
+### Slice A
+
+**Files**: \`src/a.ts\`
+
+**Parallel-safe**: yes
+
+Do A.
+
+**Targeted Validation**:
+\`\`\`sh
+npm run check
+\`\`\`
+
+### Slice B
+
+**Files**: \`src/b.ts\`
+
+**Parallel-safe**: yes
+
+Do B.
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+
+### Slice C
+
+**Files**: \`src/c.ts\`
+
+**Parallel-safe**: yes
+
+**Needs**:
+- Slice A
+- Slice B
+
+Do C on top of A and B.
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+`;
+
+test("the bold Parallel-safe label is detected without a [parallel] title tag", async () => {
+  const { root, plan } = await fencePlanRepo(`# Bold labels
+
+### Slice A
+
+**Files**: \`src/a.ts\`
+
+**Parallel-safe**: yes
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+
+### Slice B
+
+**Files**: \`src/b.ts\`
+
+**Parallel-safe:** yes
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+`);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "auto" });
+  assert.equal(result.manifest.metadata?.selectedTopology, "worktree-fanout");
+});
+
+test("waves mode compiles two parallel slices plus a dependent third into a checkpointed mixed manifest", async () => {
+  const { root, plan } = await fencePlanRepo(WAVE_PLAN);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: true });
+  const manifest = result.manifest;
+  assert.equal(manifest.metadata?.selectedTopology, "mixed");
+  assert.deepEqual(manifest.stages.map((stage) => stage.id), ["research", "implement-slice-a", "implement-slice-b", "checkpoint-wave-1", "implement-slice-c", "integrate"]);
+  const [, a, b, checkpoint, c, integrate] = manifest.stages;
+  assert.equal(a?.isolation, "worktree");
+  assert.equal(b?.isolation, "worktree");
+  assert.equal(a?.wave, 1);
+  assert.equal(a?.baseFrom, undefined);
+  assert.equal(checkpoint?.type, "integration");
+  assert.equal(checkpoint?.integrationStrategy, "worktree-wave-checkpoint");
+  assert.deepEqual(checkpoint?.needs, ["implement-slice-a", "implement-slice-b"]);
+  assert.deepEqual(checkpoint?.validationCommands, ["npm run check", "npm test"]);
+  assert.deepEqual(checkpoint?.allowedPaths, ["src/**"]);
+  assert.equal(c?.isolation, "same-checkout");
+  assert.equal(c?.wave, 2);
+  assert.ok(c?.needs.includes("checkpoint-wave-1"), `c needs ${JSON.stringify(c?.needs)}`);
+  assert.ok((c?.schedulingNotes ?? []).length >= 1, "a serialized writer explains why");
+  assert.match((c?.schedulingNotes ?? []).join("\n"), /fewer than two implementation slices/);
+  assert.equal(integrate?.integrationStrategy, "same-checkout-finalize");
+  assert.deepEqual(integrate?.needs, ["implement-slice-c"]);
+  assert.ok(result.warnings.some((warning) => /^serialized: wave 2:/.test(warning)));
+
+  const legacy = await compilePlanFile(plan, { workingDirectory: root, mode: "auto" });
+  assert.equal(legacy.manifest.metadata?.selectedTopology, "same-checkout-serial");
+  assert.equal(legacy.manifest.stages.some((stage) => stage.integrationStrategy === "worktree-wave-checkpoint"), false);
+});
+
+test("waves mode with a single qualifying wave keeps today's fan-out shape", async () => {
+  const { root, plan } = await fencePlanRepo(WAVE_PLAN.split("### Slice C")[0] ?? "");
+  const withWaves = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: true });
+  const without = await compilePlanFile(plan, { workingDirectory: root, mode: "auto" });
+  assert.equal(withWaves.manifest.metadata?.selectedTopology, "worktree-fanout");
+  assert.deepEqual(withWaves.manifest.stages.map((stage) => stage.id), without.manifest.stages.map((stage) => stage.id));
+  assert.equal(withWaves.manifest.stages.some((stage) => stage.integrationStrategy === "worktree-wave-checkpoint"), false);
+});
+
+test("waves mode serializes a wave that follows a shared-checkout wave and explains it", async () => {
+  const { root, plan } = await fencePlanRepo(`# Serial then parallel
+
+### Slice A
+
+**Files**: \`src/a.ts\`
+
+**Parallel-safe**: no
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+
+### Slice B
+
+**Files**: \`src/b.ts\`
+
+**Parallel-safe**: yes
+
+**Needs**:
+- Slice A
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+
+### Slice C
+
+**Files**: \`src/c.ts\`
+
+**Parallel-safe**: yes
+
+**Needs**:
+- Slice A
+
+**Targeted Validation**:
+\`\`\`sh
+npm test
+\`\`\`
+`);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: true });
+  assert.equal(result.manifest.metadata?.selectedTopology, "same-checkout-serial");
+  const notes = result.manifest.stages.filter((stage) => stage.type === "implementation").flatMap((stage) => stage.schedulingNotes ?? []);
+  assert.ok(notes.length >= 1, "serialized writers explain why even when the whole plan stays serial");
+  assert.ok(result.warnings.some((warning) => /wave 2 follows a shared-checkout wave/.test(warning)), result.warnings.join("\n"));
+});
+
+test("the serial golden fixture recompiles to the same stages, topology and settings", async () => {
+  const fixtures = path.resolve(import.meta.dirname, "fixtures");
+  const result = await compilePlanFile(path.join(fixtures, "serial-golden.plan.md"), { workingDirectory: fixtures, mode: "serial" });
+  const golden = JSON.parse(await readFile(path.join(fixtures, "serial-golden.trip.json"), "utf8")) as typeof result.manifest;
+  const shape = (manifest: typeof result.manifest) => JSON.stringify({ stages: manifest.stages, topology: manifest.metadata?.selectedTopology, settings: manifest.settings });
+  assert.equal(shape(result.manifest), shape(golden));
+});

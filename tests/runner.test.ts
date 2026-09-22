@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { git } from "../src/git.ts";
-import { runManifestFile } from "../src/runner.ts";
+import { runManifestFile, validationCommandsFor } from "../src/runner.ts";
 import { loadRunState } from "../src/store.ts";
 import { formatRunSummary } from "../src/status.ts";
 import type { AgentBackend, AgentRequest, AgentResult, TripManifest } from "../src/types.ts";
@@ -989,4 +989,23 @@ test("disabling fresh closure reviewers reuses the per-stage review session", as
   assert.equal(scopes.length, 4);
   assert.ok(scopes.every((scope) => scope === undefined));
   assert.equal(state.stageStates.impl?.attempts.at(-1)?.asi.freshReviewers, false);
+});
+
+// --- Slice 6: wave checkpoints skip the final validation commands ---
+
+test("final validation commands attach to the final integration stage but not to wave checkpoints", () => {
+  const manifest: TripManifest = {
+    schemaVersion: 1,
+    name: "Commands",
+    workingDirectory: "/repo",
+    settings: { finalValidationCommands: ["npm test"], defaultValidationCommands: [] },
+    stages: [
+      { id: "checkpoint-wave-1", type: "integration", needs: [], isolation: "same-checkout", integrationStrategy: "worktree-wave-checkpoint", prompt: "Checkpoint", validationCommands: ["true"] },
+      { id: "integrate", type: "integration", needs: [], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate", validationCommands: ["npm run check"] },
+      { id: "legacy", type: "integration", needs: [], isolation: "same-checkout", prompt: "Legacy manifest without a strategy" },
+    ],
+  };
+  assert.deepEqual(validationCommandsFor(manifest, manifest.stages[0]!, true), ["true"]);
+  assert.deepEqual(validationCommandsFor(manifest, manifest.stages[1]!, true), ["npm run check", "npm test"]);
+  assert.deepEqual(validationCommandsFor(manifest, manifest.stages[2]!, true), ["npm test"]);
 });
