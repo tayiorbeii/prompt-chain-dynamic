@@ -284,9 +284,9 @@ Parallel implementation is accepted only when the compiler and validator establi
 
 The runtime creates the worktrees itself and passes their exact `cwd` to `WorkflowAgent`. It intentionally does not use dynamic-workflows' throwaway worktree option for implementation writers.
 
-### Waves (opt-in)
+### Waves
 
-Compile with `--waves` to group writers into dependency waves instead of deciding parallelism for the whole plan at once. Declared `Needs` never serialize anything; they place a slice in a later wave. A wave fans out into worktrees when every member declares parallel safety, no claims overlap inside the wave, no claim is a high-risk path, and the wave has a checkpoint base to branch from (wave 1 uses the run base; later waves need the previous wave to have checkpointed). Such a wave compiles to worktree writers plus a deterministic `checkpoint-wave-N` stage with strategy `worktree-wave-checkpoint`; other waves compile to same-checkout writers, each carrying `schedulingNotes` that say why. A manifest with any checkpoint stage has topology `mixed`, its final `integrate` stage uses `same-checkout-finalize`, and only that final stage runs the final validation commands. `--mode serial` and plain `--mode auto` are unchanged; a serial golden fixture pins that. Runtime execution of checkpoint stages lands in a later slice, so keep `--waves` off for real runs until then.
+`--mode auto` groups writers into dependency waves instead of deciding parallelism for the whole plan at once (`--no-waves` restores the legacy all-or-nothing decision). Declared `Needs` never serialize anything; they place a slice in a later wave. A wave fans out into worktrees when every member declares parallel safety, no claims overlap inside the wave, no claim is a high-risk path, and the wave has a checkpoint base to branch from (wave 1 uses the run base; later waves need the previous wave to have checkpointed). Such a wave compiles to worktree writers plus a deterministic `checkpoint-wave-N` stage with strategy `worktree-wave-checkpoint`; other waves compile to same-checkout writers, each carrying `schedulingNotes` that say why. A manifest with any checkpoint stage has topology `mixed`, its final `integrate` stage uses `same-checkout-finalize`, and only that final stage runs the final validation commands. `--mode serial` is unchanged; a serial golden fixture pins that. At run time a checkpoint stage is deterministic: no agent runs. It applies the wave's verified patches to the shared checkout, runs their validation commands, records the cumulative run-owned patch, and creates a checkpoint commit on the runtime's private ref namespace whose parent is the run base; the branch never moves until the final `integrate` stage. Later waves' worktrees branch from that checkpoint. If a checkpoint's validation fails, its patches are reverted and the run pauses as `checkpoint_blocked`; resuming re-applies the wave once. Later checkpoints and the final integrate compare the run-owned tree to the previous checkpoint instead of demanding a clean checkout, and pause as `workspace_drift` on a mismatch.
 
 ## Validation
 
@@ -301,7 +301,6 @@ Current automated suite: 113 tests (112 run against mocked agent backends using 
 ## Important limitations
 
 - The mocked test suite is the default signal; a minimal real-agent canary exists (`npm run test:canary`, [docs/CANARY.md](docs/CANARY.md)) but is not run automatically and does not substitute for exercising the package against a real authenticated model session at the scale of an actual project.
-- Only one same-base parallel writer wave is supported.
 - The issue controller is local JSONL, not a GitHub/Linear adapter.
 - There is no dedicated combined TUI; Pi commands expose status while dynamic-workflows persists agent sessions.
 - This is not an OS sandbox. Installed Pi packages and agents operate with the user's permissions.

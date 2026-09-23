@@ -7,7 +7,7 @@
 - Source, policy and contract hashes.
 - Manifest inspection view.
 - DAG scheduling and serialized/shared-checkout execution.
-- One-wave parallel worktree fan-out and deterministic fan-in.
+- Parallel worktree fan-out and deterministic fan-in, including multi-wave execution: dependency waves compiled by default in auto mode, deterministic `checkpoint-wave-N` stages that fold a wave into a private checkpoint ref, and later waves branching from it.
 - `WorkflowAgent` backend from pi-dynamic-workflows (dependency range `^3.3.0`).
 - TypeBox structured output for stage and decision agents.
 - Role tier/model routing.
@@ -50,7 +50,6 @@ The installed Git checkout diverged from the project/GitHub checkout after `7362
 
 ## Deferred
 
-- Multiple parallel implementation epochs.
 - Dynamic manifest amendment protocol.
 - GitHub Issues and Linear adapters.
 - A dedicated operator TUI.

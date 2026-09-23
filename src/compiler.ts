@@ -27,8 +27,8 @@ export interface CompileOptions {
    * Wave-aware compilation. Writers are grouped into dependency waves; a wave
    * whose slices all declare parallel safety with non-overlapping, low-risk
    * claims becomes worktree writers plus a deterministic wave checkpoint that
-   * later waves branch from. Off by default until the runtime executes waves;
-   * with it off every mode compiles exactly as before.
+   * later waves branch from. Default on for auto mode; false restores the
+   * legacy all-or-nothing decision. Serial and parallel modes ignore it.
    */
   waves?: boolean;
 }
@@ -117,7 +117,10 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
   } else if (requestedMode === "serial") {
     selectedTopology = "same-checkout-serial";
     topologyReasons = blockers;
-  } else if (options.waves) {
+  } else if (options.waves ?? true) {
+    // Wave-aware compilation is the default for auto mode now that the runtime
+    // executes wave checkpoints; pass waves: false (CLI --no-waves) for the
+    // legacy all-or-nothing decision.
     const waves = planWaves(runnableSlices);
     selectedTopology = waves.topology;
     topologyReasons = waves.topology === "worktree-fanout" ? FANOUT_REASONS : waves.reasons;
@@ -140,10 +143,7 @@ export async function compilePlanFile(planPathInput: string, options: CompileOpt
     ...runnableSlices
       .filter((slice) => !slice.emptyValidationLabel && slice.validationSource !== "fence")
       .map((slice) => `${slice.title}: no Targeted Validation fence; ${slice.validationSource === "loose" ? "validation commands came from the loose line scan" : "the stage has no validation commands"}`),
-    ...(selectedTopology === "same-checkout-serial" && blockers.length && !options.waves
-      ? blockers.map((value) => `serialized: ${value}`)
-      : []),
-    ...(options.waves && selectedTopology !== "worktree-fanout"
+    ...(selectedTopology !== "worktree-fanout" && topologyReasons.length
       ? topologyReasons.map((value) => `serialized: ${value}`)
       : []),
   ];

@@ -4,17 +4,18 @@ import { compilePlanFile } from "../src/compiler.ts";
 const args = process.argv.slice(2);
 const plan = args.shift();
 if (!plan) {
-  process.stderr.write("usage: trip-compile <plan.md> [--out file.json] [--working-directory dir] [--mode auto|serial|parallel] [--allow-unresolved] [--waves]\n");
+  process.stderr.write("usage: trip-compile <plan.md> [--out file.json] [--working-directory dir] [--mode auto|serial|parallel] [--allow-unresolved] [--waves|--no-waves]\n");
   process.exit(64);
 }
 let output: string | undefined;
 let workingDirectory: string | undefined;
 let mode: "auto" | "serial" | "parallel" = "auto";
 let allowUnresolved = false;
-let waves = false;
+let waves: boolean | undefined;
 while (args.length) {
   const token = args.shift();
   if (token === "--waves") waves = true;
+  else if (token === "--no-waves") waves = false;
   else if (token === "--out") output = args.shift();
   else if (token === "--working-directory") workingDirectory = args.shift();
   else if (token === "--mode") {

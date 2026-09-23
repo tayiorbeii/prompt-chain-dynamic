@@ -228,6 +228,19 @@ export async function captureBinaryPatch(cwd: string, includedPaths?: string[]):
   }
 }
 
+/** Undo a patch previously applied with applyPatch; new files it created are removed. */
+export async function reverseApplyPatch(cwd: string, patch: Buffer): Promise<void> {
+  if (!patch.length) return;
+  // applyPatch uses --3way, which also stages the change, so the reversal must
+  // cover the index too or the staged postimage survives as dirty paths.
+  const result = await runCommand("git", ["apply", "-R", "--index", "--whitespace=nowarn", "-"], {
+    cwd,
+    timeoutMs: 120_000,
+    input: patch.toString("utf8"),
+  });
+  if (result.exitCode !== 0) throw new Error(`patch reversal failed: ${result.stderr || result.stdout}`);
+}
+
 export async function applyPatch(cwd: string, patch: Buffer): Promise<void> {
   if (!patch.length) return;
   const result = await runCommand("git", ["apply", "--3way", "--whitespace=nowarn", "-"], {

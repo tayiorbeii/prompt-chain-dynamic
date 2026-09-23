@@ -10,6 +10,7 @@ import {
   createCheckpointCommit,
   git,
   isIgnorableDirtyPath,
+  reverseApplyPatch,
   runValidationCommands,
 } from "../src/git.ts";
 
@@ -178,4 +179,25 @@ test("empty checkpoint uses the requested base and rejects a stale base before r
   await assert.rejects(
     git(repository, ["show-ref", "--verify", "refs/prompt-chain/runs/run-stale/stages/stage"]),
   );
+});
+
+test("reverseApplyPatch undoes an applied patch including files it created", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trip-reverse-"));
+  await git(root, ["init"]);
+  await git(root, ["config", "user.email", "test@example.com"]);
+  await git(root, ["config", "user.name", "Test"]);
+  await writeFile(path.join(root, "a.ts"), "export const a = 1;\n");
+  await git(root, ["add", "a.ts"]);
+  await git(root, ["commit", "-m", "base"]);
+  await writeFile(path.join(root, "a.ts"), "export const a = 2;\n");
+  await writeFile(path.join(root, "b.ts"), "export const b = 1;\n");
+  const patch = await captureBinaryPatch(root);
+  await git(root, ["checkout", "--", "a.ts"]);
+  await rm(path.join(root, "b.ts"));
+  await applyPatch(root, patch);
+  assert.equal(await readFile(path.join(root, "a.ts"), "utf8"), "export const a = 2;\n");
+  await reverseApplyPatch(root, patch);
+  assert.equal(await readFile(path.join(root, "a.ts"), "utf8"), "export const a = 1;\n");
+  assert.equal((await readdir(root)).includes("b.ts"), false);
+  await assertCleanCheckout(root);
 });

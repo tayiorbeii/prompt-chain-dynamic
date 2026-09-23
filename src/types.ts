@@ -372,7 +372,8 @@ export interface RunState {
   updatedAt: string;
   startedAt?: string;
   completedAt?: string;
-  pauseKind?: "review_blocked" | "decision_pending" | "blocked" | "workspace_drift";
+  /** checkpoint_blocked: a wave checkpoint's validation failed; its patches were reverted and an operator must fix the evidence before resuming. */
+  pauseKind?: "review_blocked" | "decision_pending" | "blocked" | "workspace_drift" | "checkpoint_blocked";
   pauseReason?: string;
   abortRequested: boolean;
   stageStates: Record<string, StageRunState>;

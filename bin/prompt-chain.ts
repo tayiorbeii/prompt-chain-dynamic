@@ -19,7 +19,7 @@ if (command === "compile" || command === "plan") {
   const mode = valueAfter(args, "--mode") as "auto" | "serial" | "parallel" | undefined;
   const workingDirectory = path.resolve(valueAfter(args, "--working-directory") ?? process.cwd());
   const pathPolicy = valueAfter(args, "--path-policy") as "permissive" | "strict" | undefined;
-  const result = await compilePlanFile(path.resolve(input), { outputPath: path.resolve(out), workingDirectory, mode, pathPolicy, waves: args.includes("--waves") });
+  const result = await compilePlanFile(path.resolve(input), { outputPath: path.resolve(out), workingDirectory, mode, pathPolicy, waves: args.includes("--no-waves") ? false : args.includes("--waves") ? true : undefined });
   process.stdout.write(`${describeManifest(result.manifest)}\n\nOutput: ${result.outputPath}\n`);
 } else if (command === "validate" || command === "inspect") {
   const input = firstPositional(args);

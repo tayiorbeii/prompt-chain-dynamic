@@ -284,6 +284,8 @@ export async function completeChainAutonomously(options: AutonomousOptions): Pro
       ? `Run ${state.id} is waiting for a human decision. Record it with /prompt-chain-decide, then /prompt-chain-resume.`
       : state.status === "paused" && state.pauseKind === "workspace_drift"
         ? `Run ${state.id} paused before commit because the workspace needs cleanup. Preserve or move the paths named in the pause reason, then run /prompt-chain-resume ${state.id}.`
+        : state.status === "paused" && state.pauseKind === "checkpoint_blocked"
+          ? `Run ${state.id} paused because a wave checkpoint's validation failed; its patches were reverted and no checkpoint ref was written. Fix the failing evidence, then run /prompt-chain-resume ${state.id} to re-apply the wave once.`
         : state.status === "paused" && state.pauseKind === "review_blocked"
           ? `Run ${state.id} paused without committing because required integration evidence is still blocked. Supply or fix that evidence, then run /prompt-chain-resume ${state.id} for another bounded repair window.`
           : `Run ${state.id} ended ${state.status}; follow-ups were not started.`;

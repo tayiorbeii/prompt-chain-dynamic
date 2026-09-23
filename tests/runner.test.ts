@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { git } from "../src/git.ts";
-import { runManifestFile, validationCommandsFor } from "../src/runner.ts";
+import { resumeRun, runManifestFile, validationCommandsFor } from "../src/runner.ts";
 import { loadRunState } from "../src/store.ts";
 import { formatRunSummary } from "../src/status.ts";
 import type { AgentBackend, AgentRequest, AgentResult, TripManifest } from "../src/types.ts";
@@ -1008,4 +1008,103 @@ test("final validation commands attach to the final integration stage but not to
   assert.deepEqual(validationCommandsFor(manifest, manifest.stages[0]!, true), ["true"]);
   assert.deepEqual(validationCommandsFor(manifest, manifest.stages[1]!, true), ["npm run check", "npm test"]);
   assert.deepEqual(validationCommandsFor(manifest, manifest.stages[2]!, true), ["npm test"]);
+});
+
+// --- Slice 8: multi-wave execution with checkpoint refs ---
+
+function twoWaveManifest(repository: string, checkpointCommands: string[] = ["true"]): TripManifest {
+  return {
+    schemaVersion: 1,
+    name: "Two waves",
+    workingDirectory: repository,
+    settings: {
+      maxParallel: 2,
+      reviewPolicy: { required: false, reviewerCount: 1, maxRepairRounds: 1, malformedVerdict: "continue", requireFreshClosureReviewer: false },
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      { id: "a", type: "implementation", needs: ["research"], isolation: "worktree", prompt: "A", allowedPaths: ["src/**"], claimedPaths: ["src/a.ts"] },
+      { id: "b", type: "implementation", needs: ["research"], isolation: "worktree", prompt: "B", allowedPaths: ["src/**"], claimedPaths: ["src/b.ts"] },
+      { id: "checkpoint-wave-1", type: "integration", needs: ["a", "b"], isolation: "same-checkout", integrationStrategy: "worktree-wave-checkpoint", wave: 1, prompt: "Checkpoint 1", allowedPaths: ["src/**"], validationCommands: checkpointCommands },
+      { id: "c", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "worktree", baseFrom: "checkpoint-wave-1", prompt: "C", allowedPaths: ["src/**"], claimedPaths: ["src/a.ts", "src/c.ts"] },
+      { id: "d", type: "implementation", needs: ["checkpoint-wave-1"], isolation: "worktree", baseFrom: "checkpoint-wave-1", prompt: "D", allowedPaths: ["src/**"], claimedPaths: ["src/d.ts"] },
+      { id: "checkpoint-wave-2", type: "integration", needs: ["c", "d"], isolation: "same-checkout", integrationStrategy: "worktree-wave-checkpoint", baseFrom: "checkpoint-wave-1", wave: 2, prompt: "Checkpoint 2", allowedPaths: ["src/**"], validationCommands: ["true"] },
+      { id: "integrate", type: "integration", needs: ["checkpoint-wave-2"], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate", allowedPaths: ["src/**"] },
+    ],
+  };
+}
+
+class WaveBackend implements AgentBackend {
+  requests: Array<{ stageId: string; role: string }> = [];
+  branchHeadWhenCRan?: string;
+  private readonly repository: string;
+  constructor(repository: string) {
+    this.repository = repository;
+  }
+  async run(request: AgentRequest): Promise<AgentResult> {
+    this.requests.push({ stageId: request.stageId, role: request.role });
+    await mkdir(request.cwd, { recursive: true });
+    if (request.role === "research") return result("Context.");
+    if (request.role === "implementation") {
+      await mkdir(path.join(request.cwd, "src"), { recursive: true });
+      if (request.stageId === "c") {
+        // Wave 2 must see wave 1's work in its base.
+        const a = await readFile(path.join(request.cwd, "src", "a.ts"), "utf8").catch(() => undefined);
+        if (a === undefined) return result("<status>blocked</status><risk>high</risk><rationale>src/a.ts from wave 1 is missing in my base.</rationale>");
+        await writeFile(path.join(request.cwd, "src", "a.ts"), `${a}export const aFromC = 1;\n`);
+        this.branchHeadWhenCRan = (await git(this.repository, ["rev-parse", "HEAD"])).trim();
+      }
+      await writeFile(path.join(request.cwd, "src", `${request.stageId}.ts`), `export const ${request.stageId} = 1;\n`);
+      return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+    }
+    if (request.stageId === "integrate" && request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+    throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+  }
+}
+
+test("a two-wave manifest branches wave 2 from wave 1's checkpoint and commits everything once at the end", async () => {
+  const repository = await createRepository();
+  const base = (await git(repository, ["rev-parse", "HEAD"])).trim();
+  const manifestPath = await writeManifest("two-waves", twoWaveManifest(repository));
+  const backend = new WaveBackend(repository);
+  const state = await runManifestFile({ manifestPath, backend });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.equal(backend.requests.some((entry) => entry.stageId.startsWith("checkpoint-wave-")), false, "no agent runs for a checkpoint stage");
+  assert.equal(backend.branchHeadWhenCRan, base, "the branch does not move at a checkpoint");
+  const cp1 = state.stageStates["checkpoint-wave-1"];
+  const cp2 = state.stageStates["checkpoint-wave-2"];
+  assert.ok(cp1?.verifiedCommit && cp2?.verifiedCommit && cp1.verifiedCommit !== cp2.verifiedCommit);
+  assert.ok(cp1?.cumulativePatchSha256 && cp2?.cumulativePatchSha256);
+  assert.ok(state.resultCommit);
+  const head = (await git(repository, ["rev-parse", "HEAD"])).trim();
+  assert.equal(head, state.resultCommit);
+  assert.equal((await git(repository, ["rev-parse", "HEAD^"])).trim(), base, "exactly one branch commit, parented on the run base");
+  const committed = (await git(repository, ["ls-tree", "-r", "--name-only", "HEAD"])).split("\n");
+  for (const file of ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"]) assert.ok(committed.includes(file), `${file} missing from the final commit`);
+  assert.match(await readFile(path.join(repository, "src", "a.ts"), "utf8"), /aFromC/);
+  const events = (await readFile(path.join(repository, ".pi", "prompt-chain-hybrid", "runs", state.id, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; stageId?: string });
+  assert.equal(events.filter((event) => event.type === "wave.checkpointed").length, 2);
+});
+
+test("a failing wave checkpoint reverts its patches, pauses as checkpoint_blocked, and a resume re-applies the wave once", async () => {
+  const repository = await createRepository();
+  const marker = path.join(os.tmpdir(), `checkpoint-marker-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const manifestPath = await writeManifest("blocked-wave", twoWaveManifest(repository, [`test -f ${marker} || { touch ${marker}; false; }`]));
+  const backend = new WaveBackend(repository);
+  const paused = await runManifestFile({ manifestPath, backend });
+  assert.equal(paused.status, "paused", paused.pauseReason);
+  assert.equal(paused.pauseKind, "checkpoint_blocked");
+  assert.match(paused.pauseReason ?? "", /Wave checkpoint checkpoint-wave-1 failed validation/);
+  assert.equal(paused.stageStates["checkpoint-wave-1"]?.verifiedCommit, undefined, "no checkpoint ref on failure");
+  assert.equal(await readFile(path.join(repository, "src", "a.ts"), "utf8").catch(() => "absent"), "absent", "the wave's patches were reverted");
+  const eventsPath = path.join(repository, ".pi", "prompt-chain-hybrid", "runs", paused.id, "events.jsonl");
+  const applied = async (stageId: string) => (await readFile(eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; stageId?: string }).filter((event) => event.type === "integration.patch.applied" && event.stageId === stageId).length;
+  assert.equal(await applied("checkpoint-wave-1"), 2);
+
+  const resumed = await resumeRun({ repositoryRoot: repository, runId: paused.id, backend, externalReaper: false });
+  assert.equal(resumed.status, "completed", resumed.pauseReason);
+  assert.equal(await applied("checkpoint-wave-1"), 4, "wave 1 was re-applied exactly once on resume");
+  assert.equal(await applied("checkpoint-wave-2"), 2, "wave 2 then ran normally");
+  assert.ok(resumed.stageStates["checkpoint-wave-1"]?.verifiedCommit);
+  assert.match(await readFile(path.join(repository, "src", "a.ts"), "utf8"), /aFromC/);
 });

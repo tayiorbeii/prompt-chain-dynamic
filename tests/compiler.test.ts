@@ -85,8 +85,13 @@ Implement C. Declares both prior slices explicitly, not just the immediately pre
   // needs to [previousStageId] regardless of what the author declared. Assert
   // the compiled edges match the authored "**Needs**" list verbatim, not a
   // synthesized document-order chain.
-  assert.deepEqual(byId["implement-slice-b"]?.needs, ["implement-slice-a"]);
-  assert.deepEqual(byId["implement-slice-c"]?.needs, ["implement-slice-a", "implement-slice-b"]);
+  // Waves mode (the auto default) keeps every authored edge and adds the
+  // per-wave chain edge, so assert on set membership rather than verbatim order.
+  assert.deepEqual([...(byId["implement-slice-b"]?.needs ?? [])].sort(), ["implement-slice-a"]);
+  assert.deepEqual([...(byId["implement-slice-c"]?.needs ?? [])].sort(), ["implement-slice-a", "implement-slice-b"]);
+  const legacy = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: false });
+  const legacyById = Object.fromEntries(legacy.manifest.stages.map((stage) => [stage.id, stage]));
+  assert.deepEqual(legacyById["implement-slice-c"]?.needs, ["implement-slice-a", "implement-slice-b"], "legacy mode keeps the authored list verbatim");
 });
 
 test("compiler surfaces an explicit validation error when declared Needs skip an intervening same-checkout writer", async () => {
@@ -111,15 +116,18 @@ Implement B, unrelated to A or C.
 
 Implement C, which only declares Slice A even though Slice B runs between them in the same checkout.
 `);
-  // Before the fix this would have silently compiled a manifest whose actual
-  // edges (needs: [previous]) diverged from the authored dependency graph.
-  // After the fix, the declared edges are honored, which makes the same-checkout
-  // ordering conflict an explicit, loud validation failure instead of a silent
-  // divergence between the authored plan and the executed DAG.
+  // Legacy (non-wave) compilation honors the declared edges verbatim, which
+  // makes the same-checkout ordering conflict a loud validation failure.
   await assert.rejects(
-    () => compilePlanFile(plan, { workingDirectory: root, mode: "auto" }),
+    () => compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: false }),
     /same-checkout writers must be linearly ordered/,
   );
+  // Wave-aware auto mode places B and C in the same wave and chains them, so
+  // the plan compiles and C still depends on A transitively.
+  const waved = await compilePlanFile(plan, { workingDirectory: root, mode: "auto" });
+  const c = waved.manifest.stages.find((stage) => stage.id === "implement-slice-c");
+  assert.ok(c?.needs.includes("implement-slice-b"), JSON.stringify(c?.needs));
+  assert.ok(c?.needs.includes("implement-slice-a"));
 });
 
 test("compiler refuses to invent a path for an unresolved slice", async () => {
@@ -492,7 +500,7 @@ test("waves mode compiles two parallel slices plus a dependent third into a chec
   assert.deepEqual(integrate?.needs, ["implement-slice-c"]);
   assert.ok(result.warnings.some((warning) => /^serialized: wave 2:/.test(warning)));
 
-  const legacy = await compilePlanFile(plan, { workingDirectory: root, mode: "auto" });
+  const legacy = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: false });
   assert.equal(legacy.manifest.metadata?.selectedTopology, "same-checkout-serial");
   assert.equal(legacy.manifest.stages.some((stage) => stage.integrationStrategy === "worktree-wave-checkpoint"), false);
 });
@@ -500,7 +508,7 @@ test("waves mode compiles two parallel slices plus a dependent third into a chec
 test("waves mode with a single qualifying wave keeps today's fan-out shape", async () => {
   const { root, plan } = await fencePlanRepo(WAVE_PLAN.split("### Slice C")[0] ?? "");
   const withWaves = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: true });
-  const without = await compilePlanFile(plan, { workingDirectory: root, mode: "auto" });
+  const without = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: false });
   assert.equal(withWaves.manifest.metadata?.selectedTopology, "worktree-fanout");
   assert.deepEqual(withWaves.manifest.stages.map((stage) => stage.id), without.manifest.stages.map((stage) => stage.id));
   assert.equal(withWaves.manifest.stages.some((stage) => stage.integrationStrategy === "worktree-wave-checkpoint"), false);
