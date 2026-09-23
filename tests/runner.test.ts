@@ -1108,3 +1108,114 @@ test("a failing wave checkpoint reverts its patches, pauses as checkpoint_blocke
   assert.ok(resumed.stageStates["checkpoint-wave-1"]?.verifiedCommit);
   assert.match(await readFile(path.join(repository, "src", "a.ts"), "utf8"), /aFromC/);
 });
+
+// --- Review follow-ups: the compiler's default mixed output runs end to end; checkpoint errors fail closed ---
+
+test("the compiler's default mixed output (parallel wave, then a serialized writer) runs through to a result commit", async () => {
+  const repository = await createRepository();
+  await writeFile(path.join(repository, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  await git(repository, ["add", "package.json"]);
+  await git(repository, ["commit", "-m", "scripts"]);
+  const planPath = path.join(repository, "plan.md");
+  await writeFile(planPath, `# Mixed
+
+### Slice A
+
+**Files**: \`src/a.ts\`
+
+**Parallel-safe**: yes
+
+**Targeted Validation**:
+\`\`\`sh
+true
+\`\`\`
+
+### Slice B
+
+**Files**: \`src/b.ts\`
+
+**Parallel-safe**: yes
+
+**Targeted Validation**:
+\`\`\`sh
+true
+\`\`\`
+
+### Slice C
+
+**Files**: \`src/c.ts\`, \`package.json\`
+
+**Parallel-safe**: no
+
+**Needs**:
+- Slice A
+- Slice B
+
+**Targeted Validation**:
+\`\`\`sh
+true
+\`\`\`
+`);
+  const { compilePlanFile } = await import("../src/compiler.ts");
+  const manifestPath = path.join(repository, "plan.trip.json");
+  const compiled = await compilePlanFile(planPath, { workingDirectory: repository, mode: "auto", outputPath: manifestPath });
+  assert.equal(compiled.manifest.metadata?.selectedTopology, "mixed");
+  assert.ok(compiled.manifest.stages.some((stage) => stage.integrationStrategy === "worktree-wave-checkpoint"));
+  const cId = compiled.manifest.stages.find((stage) => stage.type === "implementation" && stage.isolation === "same-checkout")?.id;
+  assert.ok(cId, "slice C is serialized after the checkpoint");
+  // Reviews off: the shape under test is scheduling and integration, not review.
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as TripManifest;
+  manifest.settings = { ...manifest.settings, reviewPolicy: { ...manifest.settings?.reviewPolicy, required: false } };
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  class MixedBackend implements AgentBackend {
+    async run(request: AgentRequest): Promise<AgentResult> {
+      await mkdir(request.cwd, { recursive: true });
+      if (request.role === "research") return result("Context.");
+      if (request.role === "implementation") {
+        await mkdir(path.join(request.cwd, "src"), { recursive: true });
+        const name = request.stageId.replace("implement-slice-", "");
+        await writeFile(path.join(request.cwd, "src", `${name}.ts`), `export const ${name} = 1;\n`);
+        return result("<status>complete</status><risk>low</risk><rationale>Done.</rationale>");
+      }
+      if (request.role === "integration") return result("<status>complete</status><risk>low</risk><rationale>Integrated.</rationale>");
+      throw new Error(`unexpected request: ${request.stageId}/${request.role}`);
+    }
+  }
+  const state = await runManifestFile({ manifestPath, backend: new MixedBackend() });
+  assert.equal(state.status, "completed", state.pauseReason);
+  assert.ok(state.resultCommit, "the run committed");
+  const committed = (await git(repository, ["ls-tree", "-r", "--name-only", "HEAD"])).split("\n");
+  for (const file of ["src/a.ts", "src/b.ts", "src/c.ts"]) assert.ok(committed.includes(file), `${file} missing from the final commit`);
+  assert.equal(state.stageStates[cId!]?.status, "completed");
+});
+
+test("a deterministic checkpoint error fails the stage and the run instead of completing best-effort", async () => {
+  const repository = await createRepository();
+  const manifest = twoWaveManifest(repository);
+  // Opt into best-effort so the old behavior would have swallowed the error.
+  manifest.settings = { ...manifest.settings, continuationPolicy: { bestEffortCompletion: true, reaperEnabled: false } };
+  const manifestPath = await writeManifest("checkpoint-hard-fail", manifest);
+  const backend = new WaveBackend(repository);
+  const runsRoot = path.join(repository, ".pi", "prompt-chain-hybrid", "runs");
+  const state = await runManifestFile({
+    manifestPath,
+    backend,
+    onEvent: async ({ type, stageId }) => {
+      // Once writer a has persisted its verified patch, delete the artifact so the
+      // checkpoint's read fails with a plain error (not a safety-boundary one).
+      if (type === "stage.completed" && stageId === "a") {
+        const { readdir } = await import("node:fs/promises");
+        for (const runId of await readdir(runsRoot)) {
+          await rm(path.join(runsRoot, runId, "stages", "a", "patch.diff"), { force: true });
+        }
+      }
+    },
+  });
+  assert.equal(state.status, "failed", state.pauseReason);
+  assert.equal(state.stageStates["checkpoint-wave-1"]?.status, "failed");
+  assert.notEqual(state.stageStates["checkpoint-wave-1"]?.completionMode, "best-effort");
+  assert.equal(state.stageStates["checkpoint-wave-1"]?.verifiedCommit, undefined);
+  assert.equal(state.resultCommit, undefined, "nothing was committed");
+  assert.equal(backend.requests.filter((entry) => entry.stageId === "c" || entry.stageId === "d").length, 0, "wave 2 never ran");
+});

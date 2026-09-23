@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   applyPatch,
@@ -530,9 +530,13 @@ async function executeStage(context: RunnerContext, stage: TripStage): Promise<v
       if (stage.required !== false || context.manifest.settings?.failFast) throw error;
       return;
     }
-    if (context.manifest.settings?.continuationPolicy?.bestEffortCompletion === false) {
+    // Integration stages (including deterministic wave checkpoints) have no
+    // "remaining work" to defer: an error there is corruption, never
+    // best-effort progress. Fail closed regardless of policy.
+    if (context.manifest.settings?.continuationPolicy?.bestEffortCompletion === false || stage.type === "integration") {
       stageState.status = "failed";
       stageState.pauseReason = errorMessage(error);
+      await emit(context, "stage.failed", `Stage ${stage.id} failed: ${errorMessage(error)}`, stage.id);
       throw error;
     }
     await recordStageFollowUp(context, stage, stageState, `Stage execution error: ${errorMessage(error)}`);
@@ -837,7 +841,7 @@ async function runWriterStage(
         diffHash,
         patchPath,
         patchSha256: diffHash,
-        asi: { source: "deterministic-validation" },
+        asi: { source: "deterministic-validation", completionClaim },
         status: "checks_failed",
         startedAt: attemptStartedAt,
         completedAt: new Date().toISOString(),
@@ -863,6 +867,7 @@ async function runWriterStage(
         continue;
       }
       nextPrompt = repairPrompt(stage, context.state, validationDirection);
+      await writeRunState(context.repositoryRoot, context.state);
       continue;
     }
 
@@ -892,7 +897,11 @@ async function runWriterStage(
       });
       consecutiveNonProgress++;
       stageState.reviewRounds += 1;
-      nextPrompt = repairPrompt(stage, context.state, `Create the declared outputs that are still missing, inside your allowed paths: ${missingOutput.join(", ")}`);
+      const outputDirection = `Create the declared outputs that are still missing, inside your allowed paths: ${missingOutput.join(", ")}`;
+      const workerMissing = workerReview.missingItems.map((item) => item.trim()).filter(Boolean);
+      nextPrompt = repairPrompt(stage, context.state, workerMissing.length
+        ? `${outputDirection}\n\nAlso complete the items you reported as missing:\n${workerMissing.map((item) => `- ${item}`).join("\n")}`
+        : outputDirection);
       await writeRunState(context.repositoryRoot, context.state);
       continue;
     }
@@ -1001,15 +1010,15 @@ function resolveStageBase(context: RunnerContext, stage: TripStage): string {
  * carrying the wave's changes uncommitted, so later waves cannot demand a clean
  * checkout. They compare the run-owned tree to the last checkpoint instead.
  */
-async function assertNoDriftSinceCheckpoint(context: RunnerContext, stage: TripStage, checkpointId: string): Promise<void> {
-  const checkpoint = context.state.stageStates[checkpointId];
-  if (!checkpoint?.cumulativePatchSha256) throw new Error(`wave checkpoint ${checkpointId} has no cumulative patch hash`);
+async function assertNoDriftSinceCheckpoint(context: RunnerContext, stage: TripStage, referenceId: string): Promise<void> {
+  const reference = context.state.stageStates[referenceId];
+  if (!reference?.cumulativePatchSha256) throw new Error(`stage ${referenceId} has no cumulative patch hash to verify against`);
   const current = await captureBinaryPatch(context.repositoryRoot, runOwnedPaths(context.state));
-  if (sha256(current) !== checkpoint.cumulativePatchSha256) {
+  if (sha256(current) !== reference.cumulativePatchSha256) {
     throw new PauseRun(
       "workspace_drift",
       stage.id,
-      `The shared checkout no longer matches wave checkpoint ${checkpointId}. Restore the run-owned paths to that checkpoint's tree, then resume; no patches were applied.`,
+      `The shared checkout no longer matches the tree recorded by ${referenceId}. Restore the run-owned paths to that tree, then resume; no patches were applied.`,
     );
   }
 }
@@ -1029,8 +1038,17 @@ async function runWaveCheckpoint(context: RunnerContext, stage: TripStage, stage
   else await assertCleanCheckout(repository);
 
   const applied: Buffer[] = [];
+  // Snapshot before touching the tree so a revert can also remove untracked
+  // files a validation command left behind (coverage, build output), which
+  // would otherwise fail the clean-checkout assertion on re-entry.
+  const dirtyBefore = new Set(await changedPaths(repository));
   const revert = async (): Promise<void> => {
     for (const patch of [...applied].reverse()) await reverseApplyPatch(repository, patch);
+    const leftovers = (await changedPaths(repository)).filter((value) => !dirtyBefore.has(value) && !isRuntimePath(value));
+    for (const value of leftovers) {
+      const tracked = await git(repository, ["ls-files", "--error-unmatch", "--", value]).then(() => true, () => false);
+      if (!tracked) await rm(path.join(repository, value), { recursive: true, force: true });
+    }
   };
   try {
     for (const writer of writers) {
@@ -1052,7 +1070,17 @@ async function runWaveCheckpoint(context: RunnerContext, stage: TripStage, stage
     const failed = validation.find((result) => result.exitCode !== 0 || result.timedOut);
     // Revert before pausing so re-entry satisfies the clean-checkout assertion
     // (wave 1) or the drift check (later waves) and re-applies the wave once.
-    await revert();
+    // A failed reversal is itself a reason to pause for an operator, not a
+    // generic error that could be mistaken for deferrable work.
+    try {
+      await revert();
+    } catch (error) {
+      throw new PauseRun(
+        "checkpoint_blocked",
+        stage.id,
+        `Wave checkpoint ${stage.id} failed validation and its patches could not be fully reverted (${errorMessage(error)}). Restore the run-owned paths by hand, fix the failing evidence, then resume.`,
+      );
+    }
     stageState.attempts.push({
       attempt: attemptNum,
       role: "checkpoint",
@@ -1121,12 +1149,18 @@ async function runIntegrationStage(context: RunnerContext, stage: TripStage, sta
       await applyPatch(context.repositoryRoot, patch);
       await emit(context, "integration.patch.applied", `Applied verified patch from ${writer.id}`, stage.id);
     }
-  } else if (checkpoints.length) {
+  } else if (checkpoints.length && !stageState.attempts.length) {
     // Wave-aware manifest: every worktree patch was folded into a checkpoint,
     // so the final integrate applies nothing itself and only verifies that the
-    // shared checkout still matches the last completed checkpoint.
-    const last = [...checkpoints].reverse().find((entry) => context.state.stageStates[entry.id]?.status === "completed");
-    if (last) await assertNoDriftSinceCheckpoint(context, stage, last.id);
+    // shared checkout still matches the latest completed stage that recorded
+    // the cumulative run-owned patch: a same-checkout writer that ran after the
+    // last checkpoint, or the checkpoint itself. Skipped on re-entry, when the
+    // integration agent's own earlier edits are legitimately in the tree.
+    const reference = [...context.manifest.stages].reverse().find((entry) =>
+      ((entry.type === "implementation" && entry.isolation === "same-checkout") || isWaveCheckpointStage(entry))
+      && context.state.stageStates[entry.id]?.status === "completed"
+      && context.state.stageStates[entry.id]?.cumulativePatchSha256);
+    if (reference) await assertNoDriftSinceCheckpoint(context, stage, reference.id);
   }
 
   await runWriterStage(context, stage, stageState, true);
