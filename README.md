@@ -239,7 +239,7 @@ agent output
        no: capture durable artifact and checkpoint
 ```
 
-Worker output never creates findings. A worker that returns `continue` supplies direction for its next attempt through `missingItems`; only deterministic validation and independent reviewers can open or close a blocking finding. Runs recorded before this rule are migrated on load, with any worker-sourced findings marked resolved.
+Worker output never creates findings. A worker that returns `continue` supplies direction for its next attempt through `missingItems`; only deterministic validation and independent reviewers can open or close a blocking finding. Runs recorded before this rule are migrated on load: worker-sourced findings are relabeled `legacy-worker`, open ones are marked resolved with a migration rationale, already-resolved ones keep their evidence, and the per-finding ledger files are rewritten on the next resume.
 
 A worker that repeats itself is detected, not humored. Two consecutive worker returns with the same diff, status and missing items earn one nudge in the next prompt naming the loop and the exit. After `continuationPolicy.maxWorkerReflections` consecutive worker-only `continue` returns (default 3), the next return is routed through validation and independent review whatever the worker says, and the run log records `stage.worker.reflection_cap`. Any completion claim resets the counter; the status view shows it as worker reflections.
 
@@ -259,7 +259,7 @@ A genuinely hung operation can wait indefinitely. Abort remains cooperative at d
 
 The run lease carries two timestamps. `heartbeatAt` is renewed on a timer and proves the worker process is alive. `lastActivityAt` moves only when the worker observes agent history, streaming usage, or validation stdout/stderr, and proves the work itself is progressing. The status view shows both ages and labels a run with a fresh heartbeat but stale activity as "alive, idle", so a slow agent is distinguishable from a crashed worker without guessing.
 
-When a lease does go stale and the reaper (or an operator) reclaims a run whose stage was still running, that stage's `reclaims` counter increments. After `continuationPolicy.maxLeaseReclaims` such reclaims (default 3) the run pauses as `reclaim_exhausted` instead of being resumed again: a worker that keeps dying or stalling mid-stage needs a person to look at it. Operator resumes of paused or failed runs never count.
+When a lease does go stale and the reaper (or an operator) reclaims a run whose stage was still running, that stage's `reclaims` counter increments. After `continuationPolicy.maxLeaseReclaims` such reclaims (default 3) the run pauses as `reclaim_exhausted` instead of being resumed again: a worker that keeps dying or stalling mid-stage needs a person to look at it. Operator resumes of paused or failed runs never count, and resuming a `reclaim_exhausted` run resets every stage's counter, because that resume is the human intervention the pause asked for. A completed stage's counter also resets.
 
 ## Decision policy
 

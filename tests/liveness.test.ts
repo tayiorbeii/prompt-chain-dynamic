@@ -604,8 +604,13 @@ test("a stage reclaimed from a stale lease too many times pauses the run as recl
   assert.equal(backend.calls, callsBefore, "no agent ran once the reclaim bound was hit");
   assert.equal(paused.stageStates.impl?.reclaims, 4);
 
-  // An operator resume of the paused run is not a reclaim: the counter holds.
+  assert.equal(paused.stageStates.integrate?.status, "pending", "a never-started stage stays pending");
+  assert.ok(Object.values(paused.stageStates).every((stage) => stage.status !== "running"), "a paused run carries no running stages");
+
+  // An operator resume of the paused run is the requested intervention: counters reset and the run finishes.
   const operator = await resumeRun({ repositoryRoot: repository, runId: completed.id, backend, externalReaper: false });
-  assert.equal(operator.stageStates.impl?.reclaims, 4, "operator resumes never increment the counter");
-  assert.notEqual(operator.pauseKind, "reclaim_exhausted");
+  assert.equal(operator.status, "completed", operator.pauseReason);
+  assert.equal(operator.stageStates.impl?.reclaims, 0, "the operator resume resets the counter and completion keeps it at zero");
+  const events = (await readFile(path.join(runRoot(repository, completed.id), "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string });
+  assert.equal(events.filter((event) => event.type === "run.reclaims.reset").length, 1);
 });

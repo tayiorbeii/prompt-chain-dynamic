@@ -739,6 +739,7 @@ test("legacy worker-sourced findings load as resolved", async () => {
     findings: [
       { id: "finding-legacy", runId, stageId: "impl", attempt: 2, source: "worker", severity: "major", blocking: true, summary: "Verified the module already satisfies the contract", evidence: "prose", affectedPaths: [], disposition: "open", createdAt: "2026-07-22T15:57:19.000Z", updatedAt: "2026-07-22T15:57:19.000Z" },
       { id: "finding-review", runId, stageId: "impl", attempt: 1, source: "independent-review", severity: "major", blocking: true, summary: "Missing export", evidence: "x.ts", affectedPaths: ["src/x.ts"], disposition: "open", createdAt: "2026-07-22T15:55:01.000Z", updatedAt: "2026-07-22T15:55:01.000Z" },
+      { id: "finding-legacy-resolved", runId, stageId: "impl", attempt: 1, source: "worker", severity: "major", blocking: true, summary: "Old worker note", evidence: "prose", affectedPaths: [], disposition: "resolved", resolutionEvidence: { actor: "fresh-reviewer-ensemble", rationale: "closed by review" }, createdAt: "2026-07-22T15:50:00.000Z", updatedAt: "2026-07-22T15:56:00.000Z" },
     ],
     stageStates: {},
     decisionRequests: [],
@@ -748,9 +749,12 @@ test("legacy worker-sourced findings load as resolved", async () => {
   const state = await loadRunState(repository, runId);
   const migrated = state.findings.find((finding) => finding.id === "finding-legacy");
   assert.equal(migrated?.disposition, "resolved");
-  assert.equal(migrated?.source, "operator");
+  assert.equal(migrated?.source, "legacy-worker");
   assert.equal(migrated?.resolutionEvidence?.rationale, "legacy worker self-report; not evidence");
   assert.equal(state.findings.find((finding) => finding.id === "finding-review")?.disposition, "open");
+  const alreadyResolved = state.findings.find((finding) => finding.id === "finding-legacy-resolved");
+  assert.equal(alreadyResolved?.source, "legacy-worker");
+  assert.equal(alreadyResolved?.resolutionEvidence?.rationale, "closed by review", "existing resolution evidence is preserved");
 });
 
 // --- Slice 3: validate every attempt; review completion claims ---

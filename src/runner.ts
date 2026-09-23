@@ -231,6 +231,17 @@ export async function resumeRun(options: ResumeOptions): Promise<RunState> {
     await appendRunEvent(repository, state.id, { type: "run.reaper.launched", pids: reaperPids, source: "resume" });
   }
   const manifest = assertValidManifest(state.manifest);
+  // Legacy worker-sourced findings were relabeled on load; write the per-finding
+  // ledger files once so the on-disk ledger agrees with run.json.
+  for (const finding of state.findings.filter((entry) => entry.source === "legacy-worker")) {
+    await persistFinding(repository, finding);
+  }
+  // A reclaim_exhausted pause is a request for a human to look. Their resume
+  // is that intervention, so the run gets a fresh reclaim window.
+  if (claim.previousStatus === "paused" && claim.previousPauseKind === "reclaim_exhausted") {
+    for (const stageState of Object.values(state.stageStates)) stageState.reclaims = 0;
+    await appendRunEvent(repository, state.id, { type: "run.reclaims.reset", message: "Operator resumed a reclaim_exhausted run; stage reclaim counters reset" });
+  }
   try {
     // A claim whose previous status was "running" means the lease went stale
     // mid-stage: that is a reclaim. Operator resumes of paused or failed runs
@@ -242,10 +253,14 @@ export async function resumeRun(options: ResumeOptions): Promise<RunState> {
       state.pauseKind = "reclaim_exhausted";
       state.pauseReason = error.message;
       state.completedAt = undefined;
-      const stageState = state.stageStates[error.stageId];
-      if (stageState) {
+      // No worker owns any stage now; a paused run must not carry running
+      // stages, or the next resume would treat them as still in flight.
+      for (const stageState of Object.values(state.stageStates)) {
+        if (stageState.status !== "running") continue;
         stageState.status = "paused";
-        stageState.pauseReason = error.message;
+        stageState.pauseReason = stageState.id === error.stageId
+          ? error.message
+          : `Interrupted while ${error.stageId} exhausted its reclaim budget; resumes with the run.`;
       }
       await writeRunState(repository, state);
       await appendRunEvent(repository, state.id, { type: "run.paused", stageId: error.stageId, message: error.message });
@@ -515,6 +530,7 @@ async function executeStage(context: RunnerContext, stage: TripStage): Promise<v
     else if (stage.type === "implementation") await runWriterStage(context, stage, stageState, false);
     else await runIntegrationStage(context, stage, stageState);
     stageState.status = "completed";
+    stageState.reclaims = 0;
     stageState.completedAt = new Date().toISOString();
     await emit(context, "stage.completed", `Stage ${stage.id} completed`, stage.id);
   } catch (error) {

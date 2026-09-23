@@ -32,6 +32,8 @@ export interface LeaseClaimResult {
   state: RunState;
   reason: "claimed" | "completed" | "aborted" | "live" | "generation-mismatch";
   previousStatus: RunState["status"];
+  /** The pause kind the run carried before the claim cleared it. */
+  previousPauseKind?: RunState["pauseKind"];
 }
 
 const writeQueues = new Map<string, Promise<unknown>>();
@@ -137,6 +139,7 @@ export async function claimRunLease(
   return await withStateLock(file, async () => {
     const state = await loadRunState(repositoryRoot, runId);
     const previousStatus = state.status;
+    const previousPauseKind = state.pauseKind;
     if (state.status === "completed") return { claimed: false, state, reason: "completed", previousStatus };
     if (state.status === "aborted" && !options.reopenAborted) return { claimed: false, state, reason: "aborted", previousStatus };
     if (options.expectedGeneration !== undefined && state.lease?.generation !== options.expectedGeneration) {
@@ -158,7 +161,7 @@ export async function claimRunLease(
     state.pauseReason = undefined;
     state.updatedAt = now;
     await atomicWriteJson(file, state);
-    return { claimed: true, state, reason: "claimed", previousStatus };
+    return { claimed: true, state, reason: "claimed", previousStatus, previousPauseKind };
   });
 }
 
@@ -184,13 +187,17 @@ export function migrateLegacyWorkerFindings(state: RunState): number {
   let migrated = 0;
   for (const finding of state.findings ?? []) {
     if ((finding as { source: string }).source !== "worker") continue;
-    finding.source = "operator";
-    if (finding.disposition === "open") finding.disposition = "resolved";
-    finding.resolutionEvidence = {
-      ...finding.resolutionEvidence,
-      actor: "migration",
-      rationale: "legacy worker self-report; not evidence",
-    };
+    // Keep the provenance honest: this was a worker self-report, not an
+    // operator note. Findings that were already resolved keep their evidence.
+    finding.source = "legacy-worker";
+    if (finding.disposition === "open") {
+      finding.disposition = "resolved";
+      finding.resolutionEvidence = {
+        ...finding.resolutionEvidence,
+        actor: "migration",
+        rationale: "legacy worker self-report; not evidence",
+      };
+    }
     migrated += 1;
   }
   return migrated;
