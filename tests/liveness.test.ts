@@ -511,3 +511,101 @@ test("a silent decision warns and completes without fallback or replacement", as
   assert.ok(state.decisions.some((decision) => decision.actor === "agent" && decision.status === "decided"));
   assert.ok(!state.findings.some((finding) => finding.summary === "Autonomous fallback decision was used"));
 });
+
+// --- Slice 9: activity clock and bounded reclaim ---
+
+import { formatRunSummary } from "../src/status.ts";
+import { resumeRun } from "../src/runner.ts";
+
+function slice9Manifest(repository: string): TripManifest {
+  return {
+    schemaVersion: 1,
+    name: "Two clocks",
+    workingDirectory: repository,
+    settings: {
+      autoCommit: false,
+      reviewPolicy: { required: false, reviewerCount: 1, maxRepairRounds: 1, malformedVerdict: "continue", requireFreshClosureReviewer: false },
+      continuationPolicy: { leaseTimeoutMs: 3_000, reaperEnabled: false },
+    },
+    stages: [
+      { id: "research", type: "review", needs: [], isolation: "readonly", prompt: "Research" },
+      { id: "impl", type: "implementation", needs: ["research"], isolation: "same-checkout", prompt: "Implement", allowedPaths: ["src/**"], claimedPaths: ["src/x.ts"] },
+      { id: "integrate", type: "integration", needs: ["impl"], isolation: "same-checkout", integrationStrategy: "same-checkout-finalize", prompt: "Integrate", allowedPaths: ["src/**"] },
+    ],
+  };
+}
+
+async function slice9Repository(): Promise<string> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "two-clocks-"));
+  await git(root, ["init"]);
+  await git(root, ["config", "core.fsmonitor", "false"]);
+  await git(root, ["config", "user.email", "test@example.com"]);
+  await git(root, ["config", "user.name", "Test"]);
+  await writeFile(path.join(root, "README.md"), "fixture\n");
+  await git(root, ["add", "README.md"]);
+  await git(root, ["commit", "-m", "initial"]);
+  return root;
+}
+
+class ActiveBackend implements AgentBackend {
+  calls = 0;
+  async run(request: AgentRequest): Promise<AgentResult> {
+    this.calls += 1;
+    await mkdir(request.cwd, { recursive: true });
+    if (request.role === "research") return { success: true, text: "Context.", durationMs: 1 };
+    if (request.stageId === "impl") {
+      // Streamed activity while the agent works, then a quiet stretch longer than the heartbeat interval.
+      for (let tick = 0; tick < 3; tick += 1) { request.onActivity?.(); await new Promise((resolve) => setTimeout(resolve, 100)); }
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      await mkdir(path.join(request.cwd, "src"), { recursive: true });
+      await writeFile(path.join(request.cwd, "src", "x.ts"), "export const x = 1;\n");
+    }
+    return { success: true, text: "<status>complete</status><risk>low</risk><rationale>Done.</rationale>", durationMs: 1 };
+  }
+}
+
+test("observed activity updates the lease's activity clock independently of the heartbeat", async () => {
+  const repository = await slice9Repository();
+  const manifestPath = path.join(os.tmpdir(), `two-clocks-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(slice9Manifest(repository)));
+  const state = await runManifestFile({ manifestPath, backend: new ActiveBackend(), externalReaper: false });
+  assert.equal(state.status, "completed", state.pauseReason);
+  const durable = await loadRunState(repository, state.id);
+  assert.ok(durable.lease?.lastActivityAt, "activity was persisted");
+  assert.ok(Date.parse(durable.lease!.heartbeatAt) > Date.parse(durable.lease!.lastActivityAt!), "the heartbeat kept advancing after the last observed activity");
+  assert.match(formatRunSummary(durable), /activity age/);
+});
+
+test("a stage reclaimed from a stale lease too many times pauses the run as reclaim_exhausted, while operator resumes do not count", async () => {
+  const repository = await slice9Repository();
+  const manifestPath = path.join(os.tmpdir(), `reclaims-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(slice9Manifest(repository)));
+  const backend = new ActiveBackend();
+  const completed = await runManifestFile({ manifestPath, backend, externalReaper: false });
+  assert.equal(completed.status, "completed", completed.pauseReason);
+
+  // Forge a stale-lease crash mid-stage after three earlier reclaims. Write the
+  // file directly: writeRunState would refresh the heartbeat and make it live.
+  const statePath = path.join(runRoot(repository, completed.id), "run.json");
+  const forged = JSON.parse(await readFile(statePath, "utf8")) as typeof completed;
+  forged.status = "running";
+  forged.completedAt = undefined;
+  forged.resultCommit = undefined;
+  forged.stageStates.impl!.status = "running";
+  forged.stageStates.impl!.reclaims = 3;
+  forged.stageStates.integrate!.status = "pending";
+  forged.lease = { owner: "dead-worker", generation: forged.lease!.generation, heartbeatAt: "2026-01-01T00:00:00.000Z", leaseTimeoutMs: 3_000 };
+  await writeFile(statePath, JSON.stringify(forged));
+  const callsBefore = backend.calls;
+  const paused = await resumeRun({ repositoryRoot: repository, runId: completed.id, backend, externalReaper: false });
+  assert.equal(paused.status, "paused", paused.pauseReason);
+  assert.equal(paused.pauseKind, "reclaim_exhausted");
+  assert.match(paused.pauseReason ?? "", /Stage impl was reclaimed from a stale lease 4 times \(limit 3\)/);
+  assert.equal(backend.calls, callsBefore, "no agent ran once the reclaim bound was hit");
+  assert.equal(paused.stageStates.impl?.reclaims, 4);
+
+  // An operator resume of the paused run is not a reclaim: the counter holds.
+  const operator = await resumeRun({ repositoryRoot: repository, runId: completed.id, backend, externalReaper: false });
+  assert.equal(operator.stageStates.impl?.reclaims, 4, "operator resumes never increment the counter");
+  assert.notEqual(operator.pauseKind, "reclaim_exhausted");
+});

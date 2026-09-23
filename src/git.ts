@@ -258,12 +258,13 @@ export async function runValidationCommands(
   onWarning: (command: string, warning: ActivityWarning) => void | Promise<void> = (command, warning) => {
     console.warn(`Validation ${command}: no output for ${Math.round(warning.idleMs)}ms; continuing to wait.`);
   },
+  onActivity?: () => void,
 ): Promise<ValidationResult[]> {
   const results: ValidationResult[] = [];
   for (const command of commands) {
     const monitor = monitorActivity(warningAfterMs, (warning) => onWarning(command, warning));
     try {
-      const result = await runCommand("/bin/sh", ["-lc", command], { cwd, onActivity: monitor.activity });
+      const result = await runCommand("/bin/sh", ["-lc", command], { cwd, onActivity: () => { monitor.activity(); onActivity?.(); } });
       results.push({ command, ...result });
       if (result.exitCode !== 0) break;
     } finally {

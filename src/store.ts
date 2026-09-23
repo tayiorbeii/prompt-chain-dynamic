@@ -108,13 +108,16 @@ export async function writeRunState(repositoryRoot: string, state: RunState): Pr
 
 /** Renew only the durable lease. The generation check prevents an old worker
  * from overwriting a run after a newer resume has reclaimed it. */
-export async function heartbeatRunLease(repositoryRoot: string, runId: string, generation: number): Promise<boolean> {
+export async function heartbeatRunLease(repositoryRoot: string, runId: string, generation: number, lastActivityAt?: string): Promise<boolean> {
   const file = runStatePath(repositoryRoot, runId);
   return await withStateLock(file, async () => {
     const state = await loadRunState(repositoryRoot, runId);
     if (!state.lease || state.lease.generation !== generation || state.status !== "running") return false;
     const now = new Date().toISOString();
     state.lease.heartbeatAt = now;
+    // The activity clock is independent of the heartbeat: it only moves when the
+    // worker observed agent or validation output.
+    if (lastActivityAt) state.lease.lastActivityAt = lastActivityAt;
     state.updatedAt = now;
     await atomicWriteJson(file, state);
     return true;

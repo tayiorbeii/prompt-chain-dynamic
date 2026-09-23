@@ -65,6 +65,7 @@ export function normalizeManifest(input: TripManifest): TripManifest {
         // back into the old accept-and-follow-up behavior.
         bestEffortCompletion: false,
         maxWorkerReflections: 3,
+        maxLeaseReclaims: 3,
         ...input.settings?.continuationPolicy,
       },
       defaultValidationCommands: input.settings?.defaultValidationCommands ?? [],

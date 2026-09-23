@@ -41,6 +41,7 @@ export class RunReaper {
         state.pauseKind === "workspace_drift"
         || state.pauseKind === "review_blocked"
         || state.pauseKind === "checkpoint_blocked"
+        || state.pauseKind === "reclaim_exhausted"
         || state.manifest.settings?.continuationPolicy?.bestEffortCompletion === false
       )) {
         // Workspace cleanup and missing release evidence require operator action.

@@ -157,13 +157,22 @@ function formatLease(state: RunState, requestedAt: Date): string {
   if (!state.lease) return "not recorded";
   const heartbeat = Date.parse(state.lease.heartbeatAt);
   const age = requestedAt.getTime() - heartbeat;
+  // Two clocks: the heartbeat proves the worker process is alive; the activity
+  // clock proves the agent or a validation command is still producing output.
+  const activityAt = state.lease.lastActivityAt ? Date.parse(state.lease.lastActivityAt) : Number.NaN;
+  const activityAge = requestedAt.getTime() - activityAt;
+  const activity = Number.isFinite(activityAge)
+    ? `activity age ${formatMilliseconds(Math.max(0, activityAge))}`
+    : "activity not observed";
   const freshness = !Number.isFinite(age)
     ? "invalid timestamp"
     : state.status !== "running"
-      ? `inactive (${state.status}); last heartbeat age ${formatMilliseconds(Math.max(0, age))}`
+      ? `inactive (${state.status}); last heartbeat age ${formatMilliseconds(Math.max(0, age))}; ${activity}`
       : age <= state.lease.leaseTimeoutMs
-        ? `live; age ${formatMilliseconds(Math.max(0, age))}`
-        : `stale; overdue by ${formatMilliseconds(age - state.lease.leaseTimeoutMs)}`;
+        ? Number.isFinite(activityAge) && activityAge > state.lease.leaseTimeoutMs
+          ? `alive, idle; heartbeat age ${formatMilliseconds(Math.max(0, age))}; ${activity}`
+          : `live; heartbeat age ${formatMilliseconds(Math.max(0, age))}; ${activity}`
+        : `stale; overdue by ${formatMilliseconds(age - state.lease.leaseTimeoutMs)}; ${activity}`;
   return `generation ${state.lease.generation} | heartbeat ${formatTimestamp(state.lease.heartbeatAt)} | ${freshness}`;
 }
 

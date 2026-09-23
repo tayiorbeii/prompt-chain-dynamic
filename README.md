@@ -255,6 +255,12 @@ Observed agent history/streaming usage or validation stdout/stderr resets the co
 
 A genuinely hung operation can wait indefinitely. Abort remains cooperative at durable stage boundaries; this change does **not** add immediate interruption of an in-flight agent/tool/validation command. Internal Git, research-hook, telemetry, and heartbeat-shutdown bounds remain unchanged. Tools and providers may have their own independent limits. The runtime does not rewrite or automatically restart previously stopped runs.
 
+### Two lease clocks and the reclaim bound
+
+The run lease carries two timestamps. `heartbeatAt` is renewed on a timer and proves the worker process is alive. `lastActivityAt` moves only when the worker observes agent history, streaming usage, or validation stdout/stderr, and proves the work itself is progressing. The status view shows both ages and labels a run with a fresh heartbeat but stale activity as "alive, idle", so a slow agent is distinguishable from a crashed worker without guessing.
+
+When a lease does go stale and the reaper (or an operator) reclaims a run whose stage was still running, that stage's `reclaims` counter increments. After `continuationPolicy.maxLeaseReclaims` such reclaims (default 3) the run pauses as `reclaim_exhausted` instead of being resumed again: a worker that keeps dying or stalling mid-stage needs a person to look at it. Operator resumes of paused or failed runs never count.
+
 ## Decision policy
 
 Default:

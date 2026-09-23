@@ -28,8 +28,11 @@ export type FailureCategory = "transient" | "context-overflow" | "provider-quota
 export interface RunLease {
   owner: string;
   generation: number;
+  /** Proves the worker process is alive; renewed on a timer. */
   heartbeatAt: string;
   leaseTimeoutMs: number;
+  /** Proves the agent or a validation command is producing output; a fresh heartbeat with stale activity means alive but idle. */
+  lastActivityAt?: string;
 }
 
 export interface AttemptRecord {
@@ -89,6 +92,8 @@ export interface ContinuationPolicy {
   automaticFollowUpAttemptLimit?: number;
   /** Consecutive worker-only `continue` returns tolerated before the next return is forced through validation and review. Defaults to 3. */
   maxWorkerReflections?: number;
+  /** Stale-lease reclaims one stage may absorb before the run pauses as reclaim_exhausted. Defaults to 3. */
+  maxLeaseReclaims?: number;
   checkpointVerifiedStages?: boolean;
   onRequiredExhaustion?: "research";
   onOptionalExhaustion?: "checkpoint-and-follow-up";
@@ -335,6 +340,8 @@ export interface StageRunState {
   reviewRounds: number;
   /** Consecutive worker `continue` returns that were not completion claims; reset by any claim. */
   workerReflections?: number;
+  /** Times a stale-lease reclaim reopened this stage while it was running; operator resumes do not count. */
+  reclaims?: number;
   schedulingReason?: StageSchedulingReason;
   blockedBy?: string[];
   contractHash?: string;
@@ -373,7 +380,7 @@ export interface RunState {
   startedAt?: string;
   completedAt?: string;
   /** checkpoint_blocked: a wave checkpoint's validation failed; its patches were reverted and an operator must fix the evidence before resuming. */
-  pauseKind?: "review_blocked" | "decision_pending" | "blocked" | "workspace_drift" | "checkpoint_blocked";
+  pauseKind?: "review_blocked" | "decision_pending" | "blocked" | "workspace_drift" | "checkpoint_blocked" | "reclaim_exhausted";
   pauseReason?: string;
   abortRequested: boolean;
   stageStates: Record<string, StageRunState>;

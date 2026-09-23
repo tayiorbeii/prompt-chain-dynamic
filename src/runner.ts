@@ -232,8 +232,25 @@ export async function resumeRun(options: ResumeOptions): Promise<RunState> {
   }
   const manifest = assertValidManifest(state.manifest);
   try {
-    await reconcileInterruptedStages(repository, state, claim.previousStatus === "failed", options.adoptCurrentHead === true);
+    // A claim whose previous status was "running" means the lease went stale
+    // mid-stage: that is a reclaim. Operator resumes of paused or failed runs
+    // are not.
+    await reconcileInterruptedStages(repository, state, claim.previousStatus === "failed", options.adoptCurrentHead === true, claim.previousStatus === "running");
   } catch (error) {
+    if (error instanceof ReclaimExhausted) {
+      state.status = "paused";
+      state.pauseKind = "reclaim_exhausted";
+      state.pauseReason = error.message;
+      state.completedAt = undefined;
+      const stageState = state.stageStates[error.stageId];
+      if (stageState) {
+        stageState.status = "paused";
+        stageState.pauseReason = error.message;
+      }
+      await writeRunState(repository, state);
+      await appendRunEvent(repository, state.id, { type: "run.paused", stageId: error.stageId, message: error.message });
+      return state;
+    }
     if (!isSafetyBoundaryError(error)) throw error;
     state.pauseKind = "workspace_drift";
     state.pauseReason = errorMessage(error);
@@ -1338,6 +1355,7 @@ async function validateStage(
   const results = await runValidationCommands(
     cwd, commands, context.manifest.settings?.commandTimeoutMs ?? 15 * 60_000,
     (command, warning) => reportIdleWarning(context, stage.id, "validation.command.idle", `Validation ${command}`, warning, { command }),
+    () => noteActivity(context),
   );
   stageState.validationResults = results;
   await writeArtifact(context.repositoryRoot, context.state.id, `stages/${stage.id}/attempt-${attemptNum}/validation.json`, `${JSON.stringify(results, null, 2)}\n`);
@@ -1764,9 +1782,20 @@ function newStageState(id: string): StageRunState {
     status: "pending",
     attempts: [],
     reviewRounds: 0,
+    reclaims: 0,
     changedPaths: [],
     validationResults: [],
   };
+}
+
+/** Thrown by resume reconciliation when a stage has been reclaimed from a stale lease too many times. */
+class ReclaimExhausted extends Error {
+  readonly stageId: string;
+  constructor(stageId: string, count: number, maximum: number) {
+    super(`Stage ${stageId} was reclaimed from a stale lease ${count} times (limit ${maximum}). The worker keeps dying or stalling mid-stage; inspect the stage's attempts and events, fix the cause, then resume.`);
+    this.name = "ReclaimExhausted";
+    this.stageId = stageId;
+  }
 }
 
 /** Returns an empty NormalizedReview for crash/pre-review attempt records. */
@@ -1864,6 +1893,7 @@ async function reconcileInterruptedStages(
   state: RunState,
   recoverFailed = false,
   adoptCurrentHead = false,
+  staleReclaim = false,
 ): Promise<void> {
   const current = await currentHead(repository);
   const journalPath = path.join(runRoot(repository, state.id), "integration", "journal.json");
@@ -1968,6 +1998,16 @@ async function reconcileInterruptedStages(
     }
   }
 
+  if (staleReclaim) {
+    const maximum = state.manifest.settings?.continuationPolicy?.maxLeaseReclaims ?? 3;
+    for (const stage of interrupted) {
+      const stageState = state.stageStates[stage.id];
+      if (!stageState || stageState.status !== "running") continue;
+      // Old run states lack the counter; treat undefined as zero.
+      stageState.reclaims = (stageState.reclaims ?? 0) + 1;
+      if (stageState.reclaims > maximum) throw new ReclaimExhausted(stage.id, stageState.reclaims, maximum);
+    }
+  }
   for (const stage of interrupted) {
     const stageState = state.stageStates[stage.id];
     if (!stageState) continue;
@@ -2031,7 +2071,7 @@ function startLeaseHeartbeat(context: RunnerContext): () => Promise<void> {
     // Never queue unbounded writes behind a wedged filesystem operation. A stale
     // lease lets the detached reaper reclaim this generation instead.
     if (pending) return;
-    pending = heartbeatRunLease(context.repositoryRoot, context.state.id, lease.generation)
+    pending = heartbeatRunLease(context.repositoryRoot, context.state.id, lease.generation, context.state.lease?.lastActivityAt)
       .then(async (renewed) => {
         if (!renewed) throw new LeaseSuperseded();
         if (lastFailure) {
@@ -2112,6 +2152,11 @@ function escapeXml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+/** Observed agent or validation output moves the lease's activity clock; the heartbeat timer persists it. */
+function noteActivity(context: RunnerContext): void {
+  if (context.state.lease) context.state.lease.lastActivityAt = new Date().toISOString();
+}
+
 async function reportIdleWarning(
   context: RunnerContext,
   stageId: string,
@@ -2142,7 +2187,7 @@ async function runAgent(
   const monitor = monitorActivity(warningAfterMs, (warning) =>
     reportIdleWarning(context, request.stageId, "agent.call.idle", label, warning, { role: request.role }));
   try {
-    return await context.backend.run({ ...request, timeoutMs: 0, onActivity: monitor.activity });
+    return await context.backend.run({ ...request, timeoutMs: 0, onActivity: () => { monitor.activity(); noteActivity(context); } });
   } catch (error) {
     const message = errorMessage(error);
     try {

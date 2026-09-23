@@ -8,7 +8,7 @@
       "version": "0.1.0"
     },
     "sourceGuide": "serial-golden.plan.md",
-    "generatedAt": "2026-09-22T23:39:26.059Z",
+    "generatedAt": "2026-09-23T00:04:05.309Z",
     "requestedMode": "serial",
     "selectedTopology": "same-checkout-serial",
     "topologyReasons": [
@@ -31,7 +31,7 @@
       "engine": "pi-dynamic-workflows",
       "version": "3.0.0"
     },
-    "contractHash": "sha256:fdbcc0cb39ef0ee6e50331dcc1c52151097f6fe6cdace597020e7ed04d85302c"
+    "contractHash": "sha256:a947965f20f4f6305920edb8cf0a842467f8c3fb39b7787c93300dfafcdb32b9"
   },
   "settings": {
     "maxParallel": 3,
@@ -62,7 +62,8 @@
       "reaperPollIntervalMs": 5000,
       "heartbeatStopTimeoutMs": 5000,
       "bestEffortCompletion": false,
-      "maxWorkerReflections": 3
+      "maxWorkerReflections": 3,
+      "maxLeaseReclaims": 3
     }
   },
   "stages": [
