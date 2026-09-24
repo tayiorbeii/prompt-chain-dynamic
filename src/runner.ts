@@ -352,7 +352,12 @@ export async function recordHumanDecision(
   state.pauseKind = undefined;
   state.pauseReason = undefined;
   await atomicWriteJson(path.join(runRoot(repository, runId), "decisions", `${decision.id}.json`), decision);
-  await appendRunEvent(repository, runId, { type: "decision.human.recorded", stageId: request.stageId, decisionId: decision.id });
+  await appendRunEvent(repository, runId, {
+    type: "decision.human.recorded",
+    stageId: request.stageId,
+    decisionId: decision.id,
+    message: `Stage ${request.stageId} human decision recorded: ${decision.choice ?? "(no choice)"}`,
+  });
   await writeRunState(repository, state);
   return state;
 }
@@ -1309,7 +1314,12 @@ async function resolveDecision(
   });
   context.state.decisionRequests.push(request);
   await atomicWriteJson(path.join(runRoot(context.repositoryRoot, context.state.id), "decisions", `${request.id}.json`), request);
-  await appendRunEvent(context.repositoryRoot, context.state.id, { type: "decision.requested", stageId: stage.id, requestId: request.id });
+  await appendRunEvent(context.repositoryRoot, context.state.id, {
+    type: "decision.requested",
+    stageId: stage.id,
+    requestId: request.id,
+    message: `Stage ${stage.id} requested a decision: ${request.question}`,
+  });
   const maximum = context.manifest.settings?.decisionPolicy?.maxDecisionRounds ?? 2;
   const sessionTimeoutMs = context.manifest.settings?.sessionTimeoutMs ?? 30 * 60_000;
   const decisionTimeoutMs = context.manifest.settings?.continuationPolicy?.decisionTimeoutMs
@@ -1369,7 +1379,13 @@ async function resolveDecision(
   }
   context.state.decisions.push(recommendation);
   await atomicWriteJson(path.join(runRoot(context.repositoryRoot, context.state.id), "decisions", `${recommendation.id}.json`), recommendation);
-  await appendRunEvent(context.repositoryRoot, context.state.id, { type: "decision.agent.recorded", stageId: stage.id, decisionId: recommendation.id, status: recommendation.status });
+  await appendRunEvent(context.repositoryRoot, context.state.id, {
+    type: "decision.agent.recorded",
+    stageId: stage.id,
+    decisionId: recommendation.id,
+    status: recommendation.status,
+    message: `Stage ${stage.id} decision ${recommendation.status}: ${recommendation.choice ?? "(no choice)"}${recommendation.implementationDirection ? ` | ${recommendation.implementationDirection}` : ""}`,
+  });
   // Human mode still records the recommendation, but no longer wedges the run.
   // A human can review/override the durable decision after completion.
   return recommendation.implementationDirection ?? recommendation.choice ?? recommendation.rationale;
@@ -1495,6 +1511,7 @@ async function persistWriterBoundary(
     patchSha256: digest,
     changedPaths: stageState.changedPaths,
     verifiedCommit: stageState.verifiedCommit,
+    message: `Stage ${stage.id} boundary persisted: ${stageState.changedPaths.length} changed path(s), patch ${digest.slice(0, 12)}${stageState.verifiedCommit ? `, checkpoint ${stageState.verifiedCommit.slice(0, 8)}` : ", no checkpoint commit"}`,
   });
   await writeRunState(context.repositoryRoot, context.state);
 }
@@ -1748,6 +1765,9 @@ ${stage.prompt}
 OPEN FINDINGS THAT MUST BE EXPLICITLY CLOSED OR RETAINED
 ${formatOpenFindings(open)}
 
+RECORDED DECISIONS FOR THIS STAGE
+${formatRecordedDecisions(context.state, stage.id)}
+
 DETERMINISTIC VALIDATION
 ${validation.length
     ? validation.map((result) => `${result.exitCode === 0 ? "PASS" : "FAIL"}: ${result.command}`).join("\n")
@@ -1761,7 +1781,8 @@ Rules:
 - If any correction is needed, return continue and a blocking finding.
 - If a product/architecture choice is needed, return needs_decision with options and a recommendation.
 - Return blocked only for a hard policy, structural impossibility, or failed reviewer session.
-- Return complete only when all acceptance criteria and every listed open finding are resolved.
+- A recorded decision supersedes any conflicting example, sample value, or wording in the approved stage. Verify the work against the decision's direction; do not block on the superseded wording and do not reopen the decided question.
+- Return complete only when all acceptance criteria (as amended by recorded decisions) and every listed open finding are resolved.
 
 Return exactly one status and zero or more findings:
 <status>complete|continue|blocked|needs_decision</status>
@@ -1790,7 +1811,20 @@ Decision mode: ${context.state.decisionMode}
 Allowed paths: ${(stage.allowedPaths ?? []).join(", ")}
 Claimed paths: ${(stage.claimedPaths ?? []).join(", ")}
 Open findings:
-${formatOpenFindings(openBlockingFindings(context.state.findings, stage.id))}`;
+${formatOpenFindings(openBlockingFindings(context.state.findings, stage.id))}
+Decisions already recorded for this stage (a repeated question should reuse them unless new evidence contradicts them):
+${formatRecordedDecisions(context.state, stage.id)}`;
+}
+
+/** Decided decisions for a stage, oldest first, in the form reviewers and decision agents read. */
+function formatRecordedDecisions(state: RunState, stageId: string): string {
+  const decided = state.decisions.filter((entry) => entry.stageId === stageId && entry.status === "decided");
+  if (!decided.length) return "None.";
+  return decided.map((entry, index) => [
+    `${index + 1}. Choice: ${entry.choice ?? "(none)"} (by ${entry.actor})`,
+    `   Rationale: ${entry.rationale}`,
+    entry.implementationDirection ? `   Direction: ${entry.implementationDirection}` : undefined,
+  ].filter(Boolean).join("\n")).join("\n");
 }
 
 function latestDecisionDirection(state: RunState, stageId: string): string | undefined {

@@ -228,6 +228,7 @@ export async function persistFinding(repositoryRoot: string, finding: Finding): 
     findingId: finding.id,
     severity: finding.severity,
     blocking: finding.blocking,
+    message: `Finding ${finding.disposition} (${finding.severity}${finding.blocking ? ", blocking" : ""}, ${finding.source}) on ${finding.stageId}: ${finding.summary}`,
   });
 }
 

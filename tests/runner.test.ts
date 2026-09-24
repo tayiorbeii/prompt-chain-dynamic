@@ -8,6 +8,7 @@ import { git } from "../src/git.ts";
 import { resumeRun, runManifestFile, validationCommandsFor } from "../src/runner.ts";
 import { loadRunState, writeRunState } from "../src/store.ts";
 import { formatRunSummary } from "../src/status.ts";
+import { readRunEvents } from "../src/logs.ts";
 import type { AgentBackend, AgentRequest, AgentResult, TripManifest } from "../src/types.ts";
 
 class FeedbackBackend implements AgentBackend {
@@ -333,7 +334,9 @@ test("runtime executes independent writers in worktrees and fans patches in", as
 });
 
 class DecisionBackend implements AgentBackend {
+  readonly reviewPrompts: string[] = [];
   async run(request: AgentRequest): Promise<AgentResult> {
+    if (request.role === "review") this.reviewPrompts.push(request.prompt);
     if (request.role === "research") return result("Research complete.");
     if (request.stageId === "choose-order" && request.role === "implementation") {
       return result(`<status>needs_decision</status><risk>low</risk><rationale>Two safe ordering strategies exist.</rationale><decisionQuestion>Which ordering strategy should be used?</decisionQuestion><option><id>initial</id>Preserve initial order</option><option><id>original-count</id>Sort by immutable original count</option><recommendedOption>initial</recommendedOption><recommendationRationale>It is the smallest reversible fix.</recommendationRationale>`);
@@ -374,11 +377,25 @@ test("needs_decision defaults to an autonomous decision agent", async () => {
   const repository = await createRepository();
   const manifestPath = path.join(os.tmpdir(), `trip-decision-${Date.now()}.json`);
   await writeFile(manifestPath, JSON.stringify(decisionManifest(repository)));
-  const state = await runManifestFile({ manifestPath, backend: new DecisionBackend() });
+  const backend = new DecisionBackend();
+  const state = await runManifestFile({ manifestPath, backend });
   assert.equal(state.status, "completed", state.pauseReason);
   assert.equal(state.decisionMode, "agent");
   assert.ok(state.decisions.some((decision) => decision.actor === "agent" && decision.status === "decided"));
   assert.equal(await readFile(path.join(repository, "src", "decision.ts"), "utf8"), "export const order = 'initial';\n");
+
+  // Reviewers that run after a decision see it and are told it supersedes conflicting stage wording.
+  const reviewAfterDecision = backend.reviewPrompts.filter((prompt) => prompt.includes("RECORDED DECISIONS FOR THIS STAGE") && prompt.includes("Choice: initial") && prompt.includes("Store and reuse the initial parent order."));
+  assert.ok(reviewAfterDecision.length >= 1, "the closure review prompt carries the recorded decision");
+  assert.ok(reviewAfterDecision[0]!.includes("A recorded decision supersedes any conflicting example"));
+
+  // Decision and boundary events carry human-readable messages for --watch and onEvent consumers.
+  const events = await readRunEvents(repository, state.id);
+  assert.match(events.find((event) => event.type === "decision.requested")?.message ?? "", /Which ordering strategy should be used\?/);
+  assert.match(events.find((event) => event.type === "decision.agent.recorded")?.message ?? "", /decision decided: initial \| Store and reuse/);
+  const boundaries = events.filter((event) => event.type === "stage.boundary.persisted");
+  assert.ok(boundaries.length >= 1);
+  assert.ok(boundaries.every((event) => /boundary persisted: \d+ changed path/.test(event.message ?? "")));
 });
 
 test("human decision flag records an agent recommendation without wedging autonomous completion", async () => {
@@ -671,6 +688,9 @@ test("required integration pauses instead of committing best-effort work with bl
   assert.equal(state.stageStates.integrate?.status, "paused");
   assert.equal(state.resultCommit, undefined);
   assert.ok(state.findings.some((finding) => finding.stageId === "integrate" && finding.blocking && finding.disposition === "open"));
+  const opened = (await readRunEvents(repository, state.id)).filter((event) => event.type === "finding.open");
+  assert.ok(opened.length >= 1);
+  assert.match(opened[0]!.message ?? "", /^Finding open \(critical, blocking, integration-review\) on integrate: Mandatory release evidence is unavailable/);
 });
 
 // --- Slice 2: worker verdicts never mint findings ---

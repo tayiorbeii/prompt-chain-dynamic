@@ -306,7 +306,7 @@ Human-review mode:
 needs_decision → decision agent recommendation → continue with safest reversible choice → durable follow-up for human review
 ```
 
-A decision supplies direction only. It cannot close the associated implementation finding. If decision sessions time out or return malformed output, the runtime records an `auto` decision and continues with the safest reversible in-scope option.
+A decision supplies direction only. It cannot close the associated implementation finding. Every later reviewer and decision agent for the stage sees the recorded decisions and is told they supersede conflicting examples or wording in the frozen stage prompt, so a plan defect settled by a decision is not re-litigated review after review. If decision sessions time out or return malformed output, the runtime records an `auto` decision and continues with the safest reversible in-scope option.
 
 ## Parallel writers
 
