@@ -22,7 +22,7 @@
 
 ## Verified locally — 2026-09-22 reconciliation
 
-- TypeScript static check and 128 passing tests; one opt-in real-agent canary skipped (129 total).
+- TypeScript static check and 171 passing tests; one opt-in real-agent canary skipped (172 total).
 - Smoke suite, including example manifest validation and plan compilation/validation.
 - Package dry-run inspection; no runtime state, Git metadata, or dependency directories included.
 - Temporary Git repositories and real worktree operations.

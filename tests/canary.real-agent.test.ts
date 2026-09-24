@@ -27,7 +27,7 @@
 // See docs/CANARY.md for the full design rationale.
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -37,6 +37,20 @@ import type { TripManifest } from "../src/types.ts";
 
 const ENABLED = process.env.PROMPT_CHAIN_REAL_AGENT_CANARY === "1";
 const CANARY_MODEL = process.env.PROMPT_CHAIN_CANARY_MODEL;
+const EXPECTED_EXPORT = "prompt-chain-real-agent-canary";
+
+// The byte-exact check lives in a committed script rather than an inline
+// `node -e "..."` one-liner: validation commands run through `sh -c`, and a
+// one-liner whose expected string contains double quotes loses them to the
+// shell, so it can never match the file the agent correctly wrote.
+const CHECK_SCRIPT = `const fs = require("node:fs");
+const want = ${JSON.stringify(`export const canaryProofValue = "${EXPECTED_EXPORT}";\n`)};
+const got = fs.readFileSync("src/canary-proof.ts", "utf8");
+if (got !== want) {
+  console.error("src/canary-proof.ts does not match byte for byte\\nwant: " + JSON.stringify(want) + "\\ngot:  " + JSON.stringify(got));
+  process.exit(1);
+}
+`;
 
 async function createRepository(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "prompt-chain-canary-"));
@@ -45,7 +59,9 @@ async function createRepository(): Promise<string> {
   await git(root, ["config", "user.email", "canary@example.com"]);
   await git(root, ["config", "user.name", "Canary"]);
   await writeFile(path.join(root, "README.md"), "canary fixture\n");
-  await git(root, ["add", "README.md"]);
+  await mkdir(path.join(root, "scripts"), { recursive: true });
+  await writeFile(path.join(root, "scripts", "check-canary.cjs"), CHECK_SCRIPT);
+  await git(root, ["add", "README.md", "scripts/check-canary.cjs"]);
   await git(root, ["commit", "-m", "initial"]);
   return root;
 }
@@ -59,7 +75,7 @@ test(
   },
   async () => {
     const repository = await createRepository();
-    const expectedExport = "prompt-chain-real-agent-canary";
+    const expectedExport = EXPECTED_EXPORT;
     const manifest: TripManifest = {
       schemaVersion: 1,
       name: "Real-agent canary",
@@ -97,9 +113,7 @@ test(
           ].join("\n"),
           allowedPaths: ["src/canary-proof.ts"],
           claimedPaths: ["src/canary-proof.ts"],
-          validationCommands: [
-            `node -e "const fs=require('fs'); const want='export const canaryProofValue = ${JSON.stringify(expectedExport)};\\n'; const got=fs.readFileSync('src/canary-proof.ts','utf8'); process.exit(got===want?0:1)"`,
-          ],
+          validationCommands: ["node scripts/check-canary.cjs"],
         },
         {
           id: "integrate",
