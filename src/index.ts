@@ -56,12 +56,14 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
     description: "Compile an approved Markdown implementation plan into a validated DAG",
     handler: async (args, ctx) => {
       const parsed = parseCompileArgs(args);
-      if (!parsed.plan) return ctx.ui.notify("Usage: /prompt-chain-compile <plan.md> [--out file.json] [--mode auto|serial|parallel]", "warning");
+      if (!parsed.plan) return ctx.ui.notify("Usage: /prompt-chain-compile <plan.md> [--out file.json] [--mode auto|serial|parallel] [--working-directory <dir>] [--path-policy permissive|strict] [--waves|--no-waves]", "warning");
       try {
         const result = await compilePlanFile(path.resolve(ctx.cwd, parsed.plan), {
           outputPath: parsed.output ? path.resolve(ctx.cwd, parsed.output) : undefined,
           workingDirectory: parsed.workingDirectory ? path.resolve(ctx.cwd, parsed.workingDirectory) : ctx.cwd,
           mode: parsed.mode,
+          pathPolicy: parsed.pathPolicy,
+          waves: parsed.waves,
         });
         ctx.ui.notify(`Compiled ${result.manifest.name}\nTopology: ${result.manifest.metadata?.selectedTopology}\nStages: ${result.manifest.stages.length}\nOutput: ${result.outputPath ?? "not written"}`, "info");
       } catch (error) {
@@ -416,22 +418,32 @@ export default function durableTripExtension(pi: ExtensionAPI): void {
 
 }
 
-function parseCompileArgs(args: string): {
+interface CompileArgs {
   plan?: string;
   output?: string;
   workingDirectory?: string;
   mode?: "auto" | "serial" | "parallel";
-} {
+  pathPolicy?: "permissive" | "strict";
+  waves?: boolean;
+}
+
+/** Same flags as the `prompt-chain compile` / `trip-compile` shell entry points. */
+function parseCompileArgs(args: string): CompileArgs {
   const tokens = shellWords(args);
-  const result: { plan?: string; output?: string; workingDirectory?: string; mode?: "auto" | "serial" | "parallel" } = {};
+  const result: CompileArgs = {};
   result.plan = tokens.shift();
   while (tokens.length) {
     const token = tokens.shift();
     if (token === "--out") result.output = tokens.shift();
     else if (token === "--working-directory") result.workingDirectory = tokens.shift();
+    else if (token === "--waves") result.waves = true;
+    else if (token === "--no-waves") result.waves = false;
     else if (token === "--mode") {
       const mode = tokens.shift();
       if (mode === "auto" || mode === "serial" || mode === "parallel") result.mode = mode;
+    } else if (token === "--path-policy") {
+      const policy = tokens.shift();
+      if (policy === "permissive" || policy === "strict") result.pathPolicy = policy;
     }
   }
   return result;

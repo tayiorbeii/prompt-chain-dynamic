@@ -45,6 +45,7 @@ Humans normally author Markdown. JSON is the frozen machine contract and may als
 - Redundant detached stale-lease reapers with atomic generation claims, so dead workers/reapers are automatically replaced without duplicate resumes.
 - Bounded agent, decision, and heartbeat-shutdown waits; by default, exhausted work pauses the run for operator review instead of being silently accepted (`continuationPolicy.bestEffortCompletion: false`). Set `bestEffortCompletion: true` to opt into the legacy behavior of accepting exhausted safe work best-effort with durable follow-up notes instead of pausing.
 - Verified binary patch capture and SHA-256 hashing.
+- Verified-stage checkpoint commits on the runtime's private ref namespace; a checkpoint that cannot be created is recorded as `stage.checkpoint.failed` instead of being hidden.
 - Deterministic fan-in and runtime-owned scoped result commit.
 - Run state, findings, decisions, patches and integration journals under `.pi/prompt-chain-hybrid/runs/`.
 - Optional append-only JSONL issue controller.
@@ -53,26 +54,32 @@ Humans normally author Markdown. JSON is the frozen machine contract and may als
 
 - Node.js 22.19 or newer is recommended by current Pi packages.
 - Git.
-- Pi coding agent 0.80.8 or newer.
+- Pi coding agent 0.80.10 or newer (the declared peer dependency).
 - An authenticated model available to Pi.
 
 ## Install for development
 
 ```sh
-unzip prompt-chain-dynamic-runtime-0.2.0.zip
-cd prompt-chain-dynamic-runtime
+git clone https://github.com/tayiorbeii/prompt-chain-dynamic.git
+cd prompt-chain-dynamic
 npm install
 npm test
 ```
 
-Install into one project first:
+Install the checkout into one project first, or install straight from GitHub for every project:
 
 ```sh
 cd /path/to/target-repository
-pi install -l /absolute/path/to/prompt-chain-dynamic-runtime
+pi install -l /absolute/path/to/prompt-chain-dynamic
+
+# or, user-wide from the repository
+pi install git:github.com/tayiorbeii/prompt-chain-dynamic
 ```
 
-Restart Pi or run `/reload`.
+Restart Pi or run `/reload`. If `pi list` shows the package as `(filtered)`, its
+extension is disabled in your settings: run `pi config`, enable the package's
+extension, and reload. `pi update` refreshes a GitHub install to the current
+`main`.
 
 Initialize project policy files:
 
@@ -93,7 +100,7 @@ docs/REVIEW-CHECKLIST.md
 ## Pi commands
 
 ```text
-/prompt-chain-compile <plan.md> [--out file.prompt-chain.json] [--mode auto|serial|parallel]
+/prompt-chain-compile <plan.md> [--out file.prompt-chain.json] [--mode auto|serial|parallel] [--working-directory <dir>] [--path-policy permissive|strict] [--waves|--no-waves]
 /prompt-chain-inspect <file.prompt-chain.json>
 /prompt-chain-validate <file.prompt-chain.json>
 /prompt-chain-run <file.prompt-chain.json> [--human-decisions] [--no-follow-ups]
@@ -153,12 +160,29 @@ npm link
 
 prompt-chain compile docs/plans/feature.plan.md \
   --out docs/plans/feature.prompt-chain.json \
-  --mode auto
+  --mode auto [--working-directory <dir>] [--path-policy permissive|strict] [--waves|--no-waves]
 
 prompt-chain inspect docs/plans/feature.prompt-chain.json
 prompt-chain validate docs/plans/feature.prompt-chain.json
-prompt-chain run docs/plans/feature.prompt-chain.json --human-decisions
+prompt-chain run docs/plans/feature.prompt-chain.json [--human-decisions]
 prompt-chain status <run-id>
+prompt-chain resume <run-id> [--adopt-current-head]
+prompt-chain decide <run-id> <choice> [rationale]
+prompt-chain abort <run-id>
+```
+
+`prompt-chain run` and `prompt-chain resume` execute one chain and stop. The
+other entry points mirror the Pi commands:
+
+```sh
+trip-compile <plan.md> [--out file.json] [--working-directory <dir>] [--mode auto|serial|parallel] [--allow-unresolved] [--waves|--no-waves]
+trip-validate <manifest.json> [--json]
+trip-headless run <manifest.json> [--human-decisions] [--no-follow-ups]      # autonomous completion, like /prompt-chain-run
+trip-headless resume <run-id> [--adopt-current-head] [--no-follow-ups]
+trip-headless status|decide|abort <run-id> ...
+trip-loop add <issues.jsonl> "title :: manifest.json :: priority"
+trip-loop list|once|drain|resume <issues.jsonl> ...                         # drain takes [--max N]
+trip-reaper <repository-root> <run-id>                                       # launched automatically by runs
 ```
 
 ## Authoring a plan
@@ -290,7 +314,7 @@ Parallel implementation is accepted only when the compiler and validator establi
 
 - Explicit `Parallel-safe: yes` declarations.
 - Non-overlapping concrete claims.
-- No dependency between writers.
+- No dependency between writers in the same wave (a declared `Needs` places a writer in a later wave instead).
 - No recognized high-risk shared path.
 - A common immutable Git base.
 - A downstream worktree fan-in integration stage.
@@ -313,7 +337,7 @@ Current automated suite: 172 tests (171 run against mocked agent backends using 
 
 ## Important limitations
 
-- The mocked test suite is the default signal; a minimal real-agent canary exists (`npm run test:canary`, [docs/CANARY.md](docs/CANARY.md)) but is not run automatically and does not substitute for exercising the package against a real authenticated model session at the scale of an actual project.
+- The mocked test suite is the default signal. A minimal real-agent canary (`npm run test:canary`, [docs/CANARY.md](docs/CANARY.md)) completes a three-stage task against a live model, but it is not run automatically and a toy task does not substitute for exercising the package on a real project.
 - The issue controller is local JSONL, not a GitHub/Linear adapter.
 - There is no dedicated combined TUI; Pi commands expose status while dynamic-workflows persists agent sessions.
 - This is not an OS sandbox. Installed Pi packages and agents operate with the user's permissions.
