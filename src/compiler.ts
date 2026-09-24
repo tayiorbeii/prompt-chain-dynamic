@@ -233,7 +233,7 @@ function parseSlices(markdown: string, pathPolicy: PathPolicy = "permissive"): P
         ? permissiveAllowedPaths(claimedPaths)
         : claimedPaths;
     const validation = sliceValidationCommands(section.body);
-    const needs = extractListUnderLabel(section.body, ["Needs", "Dependencies"]).map(slug);
+    const needs = extractListUnderLabel(section.body, ["Needs", "Dependencies"]).map(slug).filter((need) => !NO_DEPENDENCY_VALUES.has(need));
     const acceptanceCriteria = extractListUnderLabel(section.body, ["Acceptance criteria", "Acceptance Criteria", "Test Impact"]);
     // Accepts the documented bold form (**Parallel-safe**: yes), the
     // bold-with-colon form (**Parallel-safe:** yes) and the bare form.
@@ -277,6 +277,7 @@ function buildStages(
   };
   const implementation: TripStage[] = [];
   let previous = "research";
+  const sliceIds = new Set(slices.map((slice) => slice.id));
   for (const slice of slices) {
     // Author-declared "**Needs**"/"**Dependencies**" labels are parsed onto
     // slice.needs (see parseSlices) as slugs matching other slice titles.
@@ -286,7 +287,7 @@ function buildStages(
     // unresolved on purpose: validateManifest already reports "unknown
     // dependency" for any id that doesn't match a real stage, which is a far
     // better failure mode than silently discarding the author's intent.
-    const declaredNeeds = [...new Set(slice.needs.map((need) => `implement-${need}`))];
+    const declaredNeeds = [...new Set(slice.needs.map((need) => resolveDeclaredNeed(need, sliceIds)))];
     const needs = declaredNeeds.length
       ? declaredNeeds
       : topology === "same-checkout-serial" ? [previous] : ["research"];
@@ -331,6 +332,7 @@ const FANOUT_REASONS = [
 /** Longest dependency path among writer slices, 1-based; unresolved needs are ignored here and reported by validation. */
 function computeWaves(slices: PlanSlice[]): Map<string, number> {
   const byId = new Map(slices.map((slice) => [slice.id, slice]));
+  const sliceIds = new Set(byId.keys());
   const memo = new Map<string, number>();
   const visiting = new Set<string>();
   const depth = (slice: PlanSlice): number => {
@@ -340,7 +342,7 @@ function computeWaves(slices: PlanSlice[]): Map<string, number> {
     visiting.add(slice.id);
     let value = 1;
     for (const need of slice.needs) {
-      const dependency = byId.get(`implement-${need}`.slice(0, 72));
+      const dependency = byId.get(resolveDeclaredNeed(need, sliceIds));
       if (dependency) value = Math.max(value, depth(dependency) + 1);
     }
     visiting.delete(slice.id);
@@ -393,10 +395,11 @@ function buildWaveStages(plans: StagePlan[], finalValidationCommands: string[], 
   let anchor = research.id;
   let previousCheckpoint: string | undefined;
   const waveCount = Math.max(...plans.map((plan) => plan.wave));
+  const sliceIds = new Set(plans.map((plan) => plan.slice.id));
   for (let wave = 1; wave <= waveCount; wave += 1) {
     const members = plans.filter((plan) => plan.wave === wave);
     if (!members.length) continue;
-    const declaredNeeds = (plan: StagePlan): string[] => [...new Set(plan.slice.needs.map((need) => `implement-${need}`))];
+    const declaredNeeds = (plan: StagePlan): string[] => [...new Set(plan.slice.needs.map((need) => resolveDeclaredNeed(need, sliceIds)))];
     if (members.every((plan) => plan.isolation === "worktree")) {
       const writerIds: string[] = [];
       for (const plan of members) {
@@ -742,6 +745,34 @@ function firstHeading(markdown: string): string | undefined {
 
 function slug(value: string): string {
   return value.toLowerCase().replace(/\[parallel\]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+/** Needs values that declare the absence of dependencies rather than naming one. */
+const NO_DEPENDENCY_VALUES = new Set(["", "none", "n-a", "na", "nothing", "no-dependencies"]);
+
+/** Comparison key for a slice reference: no `implement-` prefix and no `slice-N-` ordinal. */
+function needKey(value: string): string {
+  return slug(value).replace(/^implement-/, "").replace(/^slice-\d+-/, "");
+}
+
+/**
+ * Resolve an author-declared Needs entry to a writer stage id. Authors may name
+ * the earlier slice by its full title (`Slice 1 — Data Model`), by the title
+ * without its ordinal (`Data Model`), by its ordinal alone (`Slice 1`) or by
+ * its compiled id (`implement-slice-1-data-model`); every form maps to the one
+ * slice it identifies. Unknown values keep the `implement-` form so
+ * validateManifest reports them as unknown dependencies instead of the
+ * compiler silently dropping the author's intent.
+ */
+function resolveDeclaredNeed(need: string, sliceIds: ReadonlySet<string>): string {
+  const prefixed = `implement-${need}`.slice(0, 72);
+  if (sliceIds.has(prefixed)) return prefixed;
+  if (sliceIds.has(need)) return need;
+  const ordinal = /^slice-(\d+)$/.exec(need);
+  const matches = [...sliceIds].filter((id) => ordinal
+    ? id.startsWith(`implement-slice-${ordinal[1]}-`) || id === `implement-slice-${ordinal[1]}`
+    : needKey(id) === needKey(need));
+  return matches.length === 1 && matches[0] ? matches[0] : prefixed;
 }
 
 async function exists(value: string): Promise<boolean> {

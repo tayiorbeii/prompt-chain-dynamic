@@ -277,6 +277,13 @@ export async function runValidationCommands(
 export async function createWorktree(repository: string, runId: string, stageId: string, baseRevision: string): Promise<string> {
   const repositoryKey = `${path.basename(repository)}-${sha256(repository).slice(0, 12)}`;
   const directory = path.join(path.dirname(repository), ".prompt-chain-worktrees", repositoryKey, runId, stageId);
+  // A directory left behind by an interrupted creation would make `worktree add`
+  // fail on every resume. The run state never recorded it, so no verified work
+  // lives there: clear it and any dangling registration before adding.
+  if (await pathExists(directory)) {
+    await rm(directory, { recursive: true, force: true });
+    await git(repository, ["worktree", "prune"]);
+  }
   await git(repository, ["worktree", "add", "--detach", directory, baseRevision], 120_000);
   return directory;
 }
@@ -331,6 +338,16 @@ export async function createCheckpointCommit(
     return commitHash;
   } finally {
     await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await lstat(target);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
 }
 

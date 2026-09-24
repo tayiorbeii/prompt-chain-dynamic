@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { git } from "../src/git.ts";
 import { resumeRun, runManifestFile, validationCommandsFor } from "../src/runner.ts";
-import { loadRunState } from "../src/store.ts";
+import { loadRunState, writeRunState } from "../src/store.ts";
 import { formatRunSummary } from "../src/status.ts";
 import type { AgentBackend, AgentRequest, AgentResult, TripManifest } from "../src/types.ts";
 
@@ -1222,4 +1222,58 @@ test("a deterministic checkpoint error fails the stage and the run instead of co
   assert.equal(state.stageStates["checkpoint-wave-1"]?.verifiedCommit, undefined);
   assert.equal(state.resultCommit, undefined, "nothing was committed");
   assert.equal(backend.requests.filter((entry) => entry.stageId === "c" || entry.stageId === "d").length, 0, "wave 2 never ran");
+});
+
+class BlockOnceMoreIntegrationBackend implements AgentBackend {
+  readonly prompts: string[] = [];
+  remainingBlocks = 1;
+  async run(request: AgentRequest): Promise<AgentResult> {
+    this.prompts.push(request.prompt);
+    if (request.role === "research") return result("Context gathered.");
+    if (request.stageId === "implement" && request.role !== "review") {
+      await mkdir(path.join(request.cwd, "src"), { recursive: true });
+      await writeFile(path.join(request.cwd, "src", "feature.ts"), "export const feature = true;\n");
+      return result("<status>complete</status><risk>low</risk><rationale>Implemented.</rationale>");
+    }
+    if (request.stageId === "integrate" && request.role === "review" && this.remainingBlocks > 0) {
+      this.remainingBlocks -= 1;
+      return result("<status>continue</status><risk>high</risk><rationale>Release evidence is unavailable.</rationale><finding><severity>critical</severity><blocking>true</blocking><summary>Mandatory release evidence is unavailable</summary><evidence>release manifest has unavailable gates</evidence><remediation>Provide the mandatory evidence.</remediation></finding>");
+    }
+    return result("<status>complete</status><risk>low</risk><rationale>Verified.</rationale>");
+  }
+}
+
+test("an operator resume of a review_blocked run opens a fresh repair window instead of inheriting exhausted counters", async () => {
+  const repository = await createRepository();
+  const manifest = sourceBoundaryManifest(repository);
+  manifest.settings = {
+    ...manifest.settings,
+    continuationPolicy: { autoResumeTurnLimit: 1, automaticFollowUpPasses: 0 },
+  };
+  const manifestPath = path.join(os.tmpdir(), `trip-review-blocked-resume-${Date.now()}.json`);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const backend = new BlockOnceMoreIntegrationBackend();
+
+  const paused = await runManifestFile({ manifestPath, backend, externalReaper: false });
+  assert.equal(paused.status, "paused");
+  assert.equal(paused.pauseKind, "review_blocked");
+
+  // Give the paused stage the counters an exhausted repair window leaves behind.
+  const stale = await loadRunState(repository, paused.id);
+  const integrate = stale.stageStates.integrate;
+  assert.ok(integrate);
+  integrate.reviewRounds = manifest.settings?.reviewPolicy?.maxRepairRounds ?? 4;
+  integrate.workerReflections = 3;
+  await writeRunState(repository, stale);
+
+  // The reviewer blocks exactly once more after the resume, then passes.
+  backend.remainingBlocks = 1;
+  backend.prompts.length = 0;
+  const resumed = await resumeRun({ repositoryRoot: repository, runId: paused.id, backend, externalReaper: false });
+  assert.equal(resumed.status, "completed", resumed.pauseReason);
+  assert.equal(resumed.stageStates.integrate?.status, "completed");
+  assert.ok(
+    backend.prompts.every((prompt) => !prompt.includes("AUTOMATIC STRATEGY TRANSITION")),
+    "the first repair after an operator resume is a focused repair, not a strategy transition forced by the stale round counter",
+  );
 });

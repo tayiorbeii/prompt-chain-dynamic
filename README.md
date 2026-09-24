@@ -192,6 +192,13 @@ nothing outside the fence contributes. A declared label whose fence yields no
 command fails compilation. Slices without a fence fall back to an allowlisted
 scan of command-like lines and compile with an author warning.
 
+A `**Needs**:` list names earlier slices. Any of these forms identifies the
+same slice: its full title (`Slice 1 — Data Model`), the title without its
+ordinal (`Data Model`), the ordinal alone (`Slice 1`), or its compiled stage
+id (`implement-slice-1-data-model`). `(none)` declares no dependency. A value
+that matches no slice is kept and reported by validation as an unknown
+dependency rather than silently dropped.
+
 Compilation freezes:
 
 - Source-plan hash.
@@ -223,7 +230,7 @@ A manifest may configure dynamic-workflows model tiers or explicit models:
 }
 ```
 
-The user's `~/.pi/workflows/model-tiers.json` determines which concrete models back these tiers.
+The user's `~/.pi/workflows/model-tiers.json` determines which concrete models back these tiers. Inside Pi, the runtime's subagents resolve tiers and explicit models against the host session's model registry, so providers registered by other extensions are available to them; the shell CLI and detached reapers build their own registry from disk.
 
 ## Feedback closure
 
@@ -243,7 +250,7 @@ Worker output never creates findings. A worker that returns `continue` supplies 
 
 A worker that repeats itself is detected, not humored. Two consecutive worker returns with the same diff, status and missing items earn one nudge in the next prompt naming the loop and the exit. After `continuationPolicy.maxWorkerReflections` consecutive worker-only `continue` returns (default 3), the next return is routed through validation and independent review whatever the worker says, and the run log records `stage.worker.reflection_cap`. Any completion claim resets the counter; the status view shows it as worker reflections.
 
-Each repair and resumed-stage prompt includes bounded evidence from its most recent attempts: failed command output, review rationale/findings, and patch identity. The agent must use that evidence to avoid repeating an approach that left the same failure unresolved. `reviewPolicy.maxRepairRounds` is a focused-strategy window, not a terminal cap. By default (`continuationPolicy.bestEffortCompletion: false`), exhausting the repair budget pauses the run for operator review rather than persisting unresolved work as a follow-up — the runtime never silently marks a stage complete with unresolved or exhausted review findings unless you opt in. Set `continuationPolicy.bestEffortCompletion: true` to restore the legacy accept-and-continue behavior described below. With that opt-in set, before persisting unresolved work as `follow-ups.md`, the runtime automatically opens one bounded remediation window (five attempts by default) on the same cumulative worktree. Configure `continuationPolicy.automaticFollowUpPasses` or `automaticFollowUpAttemptLimit` to adjust it. When that window closes, the runtime automatically continues from the current worktree: evolving attempts enter another focused repair window, while stagnant attempts request configured research and otherwise receive a root-cause/re-plan prompt. Worker/check failures and reviewer-only churn have separate consecutive-failure rails. At either rail or the total automatic-attempt limit (`continuationPolicy.autoResumeTurnLimit`, default 30), the runtime retains the final cumulative worktree exactly as the last attempt left it, marks unresolved findings `follow-up-created`, writes per-stage and run-level `follow-ups.md`, and continues downstream work instead of pausing.
+Each repair and resumed-stage prompt includes bounded evidence from its most recent attempts: failed command output, review rationale/findings, and patch identity. The agent must use that evidence to avoid repeating an approach that left the same failure unresolved. `reviewPolicy.maxRepairRounds` is a focused-strategy window, not a terminal cap. By default (`continuationPolicy.bestEffortCompletion: false`), exhausting the repair budget pauses the run for operator review rather than persisting unresolved work as a follow-up — the runtime never silently marks a stage complete with unresolved or exhausted review findings unless you opt in. An explicit resume of such a run opens a fresh bounded repair window: the paused stage's repair-round and worker-reflection counters start over, exactly as they do for an automatic follow-up pass, instead of carrying the values that caused the pause into the first attempt after it. Set `continuationPolicy.bestEffortCompletion: true` to restore the legacy accept-and-continue behavior described below. With that opt-in set, before persisting unresolved work as `follow-ups.md`, the runtime automatically opens one bounded remediation window (five attempts by default) on the same cumulative worktree. Configure `continuationPolicy.automaticFollowUpPasses` or `automaticFollowUpAttemptLimit` to adjust it. When that window closes, the runtime automatically continues from the current worktree: evolving attempts enter another focused repair window, while stagnant attempts request configured research and otherwise receive a root-cause/re-plan prompt. Worker/check failures and reviewer-only churn have separate consecutive-failure rails. At either rail or the total automatic-attempt limit (`continuationPolicy.autoResumeTurnLimit`, default 30), the runtime retains the final cumulative worktree exactly as the last attempt left it, marks unresolved findings `follow-up-created`, writes per-stage and run-level `follow-ups.md`, and continues downstream work instead of pausing.
 
 The run lease is renewed periodically during long agent and reviewer calls. A detached reaper observes expiry and atomically resumes the interrupted stage. Agent calls (including decisions) and validation commands **warn and keep waiting** rather than terminating on a wall-clock deadline. Fresh reviews also reconcile the finding ledger so resolved historical findings do not accumulate in later repair prompts. Safety boundaries—out-of-contract writes, workspace drift, direct agent commits, and corrupt patch hashes—still stop rather than silently ship unsafe work.
 
@@ -302,7 +309,7 @@ npm run smoke
 npm pack --dry-run
 ```
 
-Current automated suite: 113 tests (112 run against mocked agent backends using real temporary Git repositories and worktrees; 1 real-agent canary is skipped by default). Run the canary deliberately with `npm run test:canary` — see [docs/CANARY.md](docs/CANARY.md).
+Current automated suite: 172 tests (171 run against mocked agent backends using real temporary Git repositories and worktrees, including one that compiles and validates every plan shipped in the repository; 1 real-agent canary is skipped by default). Run the canary deliberately with `npm run test:canary` — see [docs/CANARY.md](docs/CANARY.md).
 
 ## Important limitations
 

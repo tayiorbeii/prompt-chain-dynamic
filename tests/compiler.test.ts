@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { compilePlanFile } from "../src/compiler.ts";
+import { validateManifest } from "../src/validation.ts";
 
 test("compiler emits worktree fanout only for explicitly parallel-safe slices", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trip-compiler-"));
@@ -569,4 +570,66 @@ test("the serial golden fixture recompiles to the same stages, topology and sett
   const golden = JSON.parse(await readFile(path.join(fixtures, "serial-golden.trip.json"), "utf8")) as typeof result.manifest;
   const shape = (manifest: typeof result.manifest) => JSON.stringify({ stages: manifest.stages, topology: manifest.metadata?.selectedTopology, settings: manifest.settings });
   assert.equal(shape(result.manifest), shape(golden));
+});
+
+test("Needs resolve by title, ordinal, compiled id or unprefixed slug, and (none) declares no dependency", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trip-compiler-"));
+  const plan = path.join(root, "plan.md");
+  await writeFile(plan, `# Reference forms
+
+### Slice 1 — Data Model Foundation
+**File**: \`src/model.ts\`
+
+**Needs**: (none)
+
+Implement the model.
+
+### Slice 2 — Scheduler Semantics
+**File**: \`src/scheduler.ts\`
+
+**Needs**:
+- implement-data-model-foundation
+
+Implement the scheduler.
+
+### Slice 3 — Supervisor
+**File**: \`src/supervisor.ts\`
+
+**Needs**:
+- Slice 1
+- implement-slice-2-scheduler-semantics
+
+Implement the supervisor.
+
+### Slice 4 — Controller
+**File**: \`src/controller.ts\`
+
+**Needs**: Data Model Foundation, Slice 3 — Supervisor
+
+Implement the controller.
+`);
+  const result = await compilePlanFile(plan, { workingDirectory: root, mode: "auto", waves: false });
+  const byId = Object.fromEntries(result.manifest.stages.map((stage) => [stage.id, stage]));
+  assert.deepEqual(byId["implement-slice-1-data-model-foundation"]?.needs, ["research"], "(none) falls back to the default edge instead of implement-none");
+  assert.deepEqual(byId["implement-slice-2-scheduler-semantics"]?.needs, ["implement-slice-1-data-model-foundation"]);
+  assert.deepEqual([...(byId["implement-slice-3-supervisor"]?.needs ?? [])].sort(), ["implement-slice-1-data-model-foundation", "implement-slice-2-scheduler-semantics"]);
+  assert.deepEqual([...(byId["implement-slice-4-controller"]?.needs ?? [])].sort(), ["implement-slice-1-data-model-foundation", "implement-slice-3-supervisor"]);
+});
+
+test("every plan shipped in the repository compiles and validates", async () => {
+  const repositoryRoot = path.resolve(import.meta.dirname, "..");
+  const plansDirectory = path.join(repositoryRoot, "docs", "plans");
+  const plans = [
+    path.join(repositoryRoot, "examples", "example.plan.md"),
+    path.join(repositoryRoot, "tests", "fixtures", "serial-golden.plan.md"),
+    ...(await readdir(plansDirectory)).filter((name) => name.endsWith(".plan.md")).map((name) => path.join(plansDirectory, name)),
+  ];
+  assert.ok(plans.length >= 4, `expected the documented plans to be present, found ${plans.length}`);
+  for (const plan of plans) {
+    const result = await compilePlanFile(plan, { workingDirectory: repositoryRoot, mode: "auto" });
+    const validation = validateManifest(result.manifest);
+    const errors = validation.issues.filter((issue) => issue.severity === "error");
+    assert.deepEqual(errors, [], `${path.relative(repositoryRoot, plan)} should compile to a valid manifest`);
+    assert.equal(validation.valid, true);
+  }
 });

@@ -46,7 +46,7 @@ Every implementation slice must contain:
 Describe the complete bounded change.
 
 **Needs**:
-- prior-slice-id
+- Title of an earlier slice (its compiled id, implement-<slug>, is also accepted)
 
 **Acceptance Criteria**:
 - observable behavior

@@ -1479,8 +1479,15 @@ async function persistWriterBoundary(
       "Durable-Trip-Base": baseRevision,
     }, patch, baseRevision);
     stageState.verifiedCommit = checkpointHash;
-  } catch {
-    // Checkpoint creation is best-effort; do not fail the stage boundary
+  } catch (error) {
+    // Checkpoint creation is best-effort; do not fail the stage boundary, but
+    // never hide it: the patch artifact is then the only durable copy.
+    await emit(
+      context,
+      "stage.checkpoint.failed",
+      `Stage ${stage.id}: verified checkpoint commit was not created (${errorMessage(error)}); the patch artifact ${relative} remains the durable copy`,
+      stage.id,
+    );
   }
   await appendRunEvent(context.repositoryRoot, context.state.id, {
     type: "stage.boundary.persisted",
@@ -2076,6 +2083,14 @@ async function reconcileInterruptedStages(
     }
     stageState.status = "pending";
     stageState.pauseReason = undefined;
+    if (!staleReclaim) {
+      // An operator resume opens a fresh bounded repair window, exactly like an
+      // automatic follow-up pass: the focused repair-round counter and the
+      // worker reflection counter start over instead of carrying the values
+      // that caused the pause into the first attempt after it.
+      stageState.reviewRounds = 0;
+      stageState.workerReflections = 0;
+    }
   }
   await writeRunState(repository, state);
 }

@@ -22,9 +22,15 @@ import {
   runFollowUpRounds,
 } from "./followups.ts";
 import { validateManifest } from "./validation.ts";
+import { setHostModelRegistry } from "./dynamic-backend.ts";
 import type { TripManifest } from "./types.ts";
 
 export default function durableTripExtension(pi: ExtensionAPI): void {
+  // Subagents spawned by the runtime must resolve tiers and models against the
+  // host session's registry, not an isolated one rebuilt from disk.
+  pi.on("session_start", (_event, ctx) => {
+    setHostModelRegistry(ctx.modelRegistry);
+  });
   if (process.env.PI_DURABLE_TRIP_WORKER === "1") return;
 
   pi.registerCommand("prompt-chain-validate", {

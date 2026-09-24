@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { WorkflowAgent } from "@quintinshaw/pi-dynamic-workflows";
-import { DynamicWorkflowBackend } from "../src/dynamic-backend.ts";
+import { DynamicWorkflowBackend, getHostModelRegistry, setHostModelRegistry } from "../src/dynamic-backend.ts";
 import type { AgentRequest } from "../src/types.ts";
 
 const usage = { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30, cost: 0.01 };
@@ -47,4 +47,17 @@ test("session scope extends the persisted session name only when present", async
   await backend.run(base);
   await backend.run({ ...base, sessionScope: "attempt-2 reviewer-1" });
   assert.deepEqual(names, ["prompt-chain:run stage:review", "prompt-chain:run stage:review attempt-2 reviewer-1"]);
+});
+
+test("the host model registry adopted at session start is handed to every backend created afterwards", () => {
+  const registry = { marker: "host-registry" } as unknown as Parameters<typeof setHostModelRegistry>[0];
+  try {
+    setHostModelRegistry(registry);
+    assert.equal(getHostModelRegistry(), registry);
+    assert.doesNotThrow(() => new DynamicWorkflowBackend());
+    assert.doesNotThrow(() => new DynamicWorkflowBackend({ modelRegistry: undefined }));
+  } finally {
+    setHostModelRegistry(undefined);
+  }
+  assert.equal(getHostModelRegistry(), undefined);
 });

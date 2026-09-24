@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,7 +9,9 @@ import {
   assertCleanCheckout,
   captureBinaryPatch,
   createCheckpointCommit,
+  createWorktree,
   git,
+  removeWorktree,
   isIgnorableDirtyPath,
   reverseApplyPatch,
   runValidationCommands,
@@ -200,4 +203,24 @@ test("reverseApplyPatch undoes an applied patch including files it created", asy
   assert.equal(await readFile(path.join(root, "a.ts"), "utf8"), "export const a = 1;\n");
   assert.equal((await readdir(root)).includes("b.ts"), false);
   await assertCleanCheckout(root);
+});
+
+test("createWorktree clears a directory left behind by an interrupted creation and a stale registration", async () => {
+  const repository = await createRepository();
+  const head = (await git(repository, ["rev-parse", "HEAD"])).trim();
+  const repositoryKey = `${path.basename(repository)}-${createHash("sha256").update(repository).digest("hex").slice(0, 12)}`;
+  const leftover = path.join(path.dirname(repository), ".prompt-chain-worktrees", repositoryKey, "run-1", "stage-a");
+  await mkdir(leftover, { recursive: true });
+  await writeFile(path.join(leftover, "stray.txt"), "stray\n");
+
+  const directory = await createWorktree(repository, "run-1", "stage-a", head);
+  assert.equal(directory, leftover);
+  assert.equal((await git(directory, ["rev-parse", "HEAD"])).trim(), head);
+  await assert.rejects(readFile(path.join(directory, "stray.txt")), "the stray file from the interrupted attempt is gone");
+
+  // A registered worktree whose run state was lost is recreated at the same base as well.
+  const again = await createWorktree(repository, "run-1", "stage-a", head);
+  assert.equal(again, directory);
+  assert.equal((await git(again, ["rev-parse", "HEAD"])).trim(), head);
+  await removeWorktree(repository, again);
 });

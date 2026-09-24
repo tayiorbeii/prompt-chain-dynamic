@@ -1,4 +1,5 @@
 import { WorkflowAgent } from "@quintinshaw/pi-dynamic-workflows";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 interface AgentUsage { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number; }
 import { Type } from "typebox";
@@ -51,6 +52,24 @@ export interface DynamicWorkflowBackendOptions {
   roleTiers?: Partial<Record<AgentRequest["role"], string>>;
   roleModels?: Partial<Record<AgentRequest["role"], string>>;
   onUsage?: (request: AgentRequest, usage: AgentUsage) => void;
+  /**
+   * Model registry of the host Pi session. With it, tiers and explicit models
+   * resolve against the same providers the interactive session sees, including
+   * extension-registered ones; without it WorkflowAgent builds an isolated
+   * registry from disk. Defaults to the registry adopted via setHostModelRegistry.
+   */
+  modelRegistry?: ModelRegistry;
+}
+
+let hostModelRegistry: ModelRegistry | undefined;
+
+/** Adopt the host Pi session's model registry for every backend created afterwards in this process. */
+export function setHostModelRegistry(registry: ModelRegistry | undefined): void {
+  hostModelRegistry = registry;
+}
+
+export function getHostModelRegistry(): ModelRegistry | undefined {
+  return hostModelRegistry;
 }
 
 /**
@@ -68,6 +87,7 @@ export class DynamicWorkflowBackend implements AgentBackend {
       cwd: process.cwd(),
       mainModel: options.mainModel,
       persistAgentSessions: options.persistAgentSessions ?? true,
+      modelRegistry: options.modelRegistry ?? hostModelRegistry,
       instructions: [
         "You are executing one bounded stage from a frozen prompt-chain manifest.",
         "The host runtime—not you—owns scheduling, Git commits, path enforcement, finding closure, and promotion.",
